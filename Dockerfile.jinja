@@ -1,0 +1,40 @@
+FROM nvidia/tensorrt-llm:latest
+
+WORKDIR /app
+
+# Copy application code
+COPY server.py .
+COPY thinkube_theme.py .
+COPY entrypoint.sh .
+
+# Copy Thinkube icons
+RUN mkdir -p /app/icons
+COPY tk_ai.svg /app/icons/
+# Convert SVG to PNG for favicon compatibility
+RUN apt-get update && apt-get install -y --no-install-recommends imagemagick && \
+    convert -background none -resize 32x32 /app/icons/tk_ai.svg /app/icons/tk_ai.png && \
+    apt-get remove -y imagemagick && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+
+# Copy and install requirements
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Model configuration from template
+ENV MODEL_ID="{{ model_id }}"
+ENV HF_TOKEN="${HF_TOKEN}"
+
+# Engine paths
+ENV ENGINE_DIR="/app/engines"
+ENV CACHE_DIR="/app/cache"
+
+# Create directories
+RUN mkdir -p ${ENGINE_DIR} ${CACHE_DIR}
+
+# Make entrypoint executable
+RUN chmod +x entrypoint.sh
+
+# Expose ports: 7860 for Gradio, 8000 for TensorRT-LLM API
+EXPOSE 7860 8000
+
+# Run the entrypoint script
+CMD ["./entrypoint.sh"]

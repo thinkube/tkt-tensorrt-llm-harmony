@@ -1,0 +1,21 @@
+apiVersion: thinkube.io/v1
+kind: TemplateManifest
+metadata:
+  name: tkt-tensorrt-llm
+  title: TensorRT-LLM Inference Server
+  description: NVIDIA TensorRT-LLM optimized inference with NVFP4 support for Blackwell (DGX Spark GB10)
+  version: 1.0.0
+  author: Thinkube Team
+  tags: ["ai", "llm", "tensorrt-llm", "nvidia", "gradio", "inference", "text-generation", "gpu", "blackwell", "nvfp4"]
+
+parameters:
+  - name: model_id
+    type: str
+    description: Hugging Face model ID (e.g., mistralai/Mistral-7B-Instruct-v0.2, openai/gpt-oss-120b)
+    pattern: "^[a-zA-Z0-9-]+/[a-zA-Z0-9._-]+$"
+
+secrets:
+  - name: HF_TOKEN
+    description: Hugging Face API token for accessing gated models
+    required: true
+    

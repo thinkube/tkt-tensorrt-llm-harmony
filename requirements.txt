@@ -1,0 +1,8 @@
+# TensorRT-LLM - NVIDIA optimized inference engine with NVFP4 support
+# Already installed in tensorrt-llm base image
+
+# OpenAI client - For communicating with TensorRT-LLM's OpenAI-compatible API
+openai>=1.0.0
+
+# Gradio - Web UI with theming support
+gradio>=4.42.0

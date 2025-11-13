@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Deploy AI Model Inference Server to Thinkube</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 0;
+            background: #f5f5f5;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+        .container {
+            background: white;
+            padding: 40px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            max-width: 500px;
+            width: 100%;
+            margin: 20px;
+        }
+        .logo {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .logo svg {
+            width: 60px;
+            height: 60px;
+        }
+        h1 {
+            margin: 0 0 10px 0;
+            color: #333;
+            text-align: center;
+        }
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            text-align: center;
+        }
+        .template-info {
+            background: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 4px;
+            padding: 15px;
+            margin-bottom: 25px;
+        }
+        .template-info h3 {
+            margin: 0 0 8px 0;
+            font-size: 16px;
+            color: #495057;
+        }
+        .template-info p {
+            margin: 0;
+            font-size: 14px;
+            color: #6c757d;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #333;
+            font-weight: 500;
+        }
+        input {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 16px;
+            box-sizing: border-box;
+        }
+        input:focus {
+            outline: none;
+            border-color: #0066cc;
+        }
+        .hint {
+            font-size: 14px;
+            color: #666;
+            margin-top: 5px;
+        }
+        button {
+            background: #0066cc;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 4px;
+            font-size: 16px;
+            cursor: pointer;
+            width: 100%;
+            font-weight: 500;
+        }
+        button:hover {
+            background: #0052a3;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .error {
+            color: #d32f2f;
+            font-size: 14px;
+            margin-top: 10px;
+        }
+        .back-link {
+            display: inline-block;
+            margin-top: 20px;
+            color: #0066cc;
+            text-decoration: none;
+            text-align: center;
+            width: 100%;
+        }
+        .back-link:hover {
+            text-decoration: underline;
+        }
+        .features {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 10px;
+        }
+        .feature-badge {
+            background: #e3f2fd;
+            color: #1976d2;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+        .gpu-warning {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            border-radius: 4px;
+            padding: 10px;
+            margin-bottom: 15px;
+            font-size: 14px;
+            color: #856404;
+        }
+        .gpu-warning strong {
+            display: block;
+            margin-bottom: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">
+            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M12 2L2 7L12 12L22 7L12 2Z" stroke="#0066cc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M2 17L12 22L22 17" stroke="#0066cc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M2 12L12 17L22 12" stroke="#0066cc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+        </div>
+        
+        <h1>Deploy to Thinkube</h1>
+        <p class="subtitle">Enter your Thinkube instance domain to deploy this template</p>
+        
+        <div class="template-info">
+            <h3>vLLM Inference Server</h3>
+            <p>High-performance text generation with vLLM engine</p>
+            <div class="features">
+                <span class="feature-badge">vLLM Engine</span>
+                <span class="feature-badge">Gradio UI</span>
+                <span class="feature-badge">RTX 3090+ Only</span>
+                <span class="feature-badge">PagedAttention</span>
+            </div>
+        </div>
+        
+        <div class="gpu-warning">
+            <strong>⚠️ GPU Required</strong>
+            This template requires an Ampere+ GPU (RTX 3090, RTX 4090, A100, etc.). Will NOT work on GTX 1080 or RTX 2080.
+        </div>
+        
+        <form id="deployForm">
+            <div class="form-group">
+                <label for="domain">Your Thinkube Domain</label>
+                <input 
+                    type="text" 
+                    id="domain" 
+                    placeholder="example.com"
+                    pattern="^[a-zA-Z0-9][a-zA-Z0-9-]{0,61}[a-zA-Z0-9]?(\.[a-zA-Z0-9][a-zA-Z0-9-]{0,61}[a-zA-Z0-9]?)*$"
+                    required
+                >
+                <div class="hint">Enter your domain without https:// or /control</div>
+            </div>
+            
+            <button type="submit" id="deployBtn">
+                Deploy Template
+            </button>
+            <div id="error" class="error"></div>
+        </form>
+        
+        <a href="https://github.com/thinkube/tkt-vllm-gradio" class="back-link">← Back to template repository</a>
+    </div>
+
+    <script>
+        // Template repository URL
+        const templateUrl = 'https://github.com/thinkube/tkt-vllm-gradio';
+        
+        // Load saved domain from localStorage
+        const savedDomain = localStorage.getItem('thinkubeDomain');
+        if (savedDomain) {
+            document.getElementById('domain').value = savedDomain;
+        }
+        
+        // Handle form submission
+        document.getElementById('deployForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const domain = document.getElementById('domain').value.trim();
+            const errorEl = document.getElementById('error');
+            
+            // Clear previous errors
+            errorEl.textContent = '';
+            
+            // Validate domain
+            if (!domain) {
+                errorEl.textContent = 'Please enter a domain';
+                return;
+            }
+            
+            // Remove any protocol if user included it
+            const cleanDomain = domain.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+            
+            // Basic domain validation
+            if (!cleanDomain.includes('.')) {
+                errorEl.textContent = 'Please enter a valid domain (e.g., example.com)';
+                return;
+            }
+            
+            // Save domain for next time
+            localStorage.setItem('thinkubeDomain', cleanDomain);
+            
+            // Construct the deployment URL
+            const deployUrl = `https://control.${cleanDomain}/templates?deploy=${encodeURIComponent(templateUrl)}`;
+            
+            // Show loading state
+            const btn = document.getElementById('deployBtn');
+            btn.disabled = true;
+            btn.textContent = 'Redirecting to Thinkube Control...';
+            
+            // Add a small delay for better UX
+            setTimeout(() => {
+                window.location.href = deployUrl;
+            }, 500);
+        });
+        
+        // Auto-focus domain input if empty
+        const domainInput = document.getElementById('domain');
+        if (!domainInput.value) {
+            domainInput.focus();
+        }
+        
+        // Allow Enter key to submit
+        domainInput.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                document.getElementById('deployForm').dispatchEvent(new Event('submit'));
+            }
+        });
+    </script>
+</body>
+</html>

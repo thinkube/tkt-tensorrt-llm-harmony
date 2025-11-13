@@ -1,0 +1,67 @@
+# {{ project_title | default(project_name) }}
+
+{{ project_description }}
+
+## 🤖 Model Information
+
+- **Model ID**: `{{ model_id }}`
+- **Engine**: vLLM (high-performance inference)
+- **Deployed on**: Thinkube platform
+
+## 🌐 Access Points
+
+- **Application**: https://{{ project_name }}.{{ domain_name }}
+- **Health Status**: https://{{ project_name }}.{{ domain_name }}/health
+- **API Endpoint**: https://{{ project_name }}.{{ domain_name }}/api
+
+## 📊 Resource Usage
+
+This application runs on GPU nodes with the following configuration:
+- **Container Size**: Large (GPU-enabled)
+- **Port**: 7860
+- **Health Check**: Enabled
+
+## 💬 Chat Interface
+
+Access the Gradio chat interface to interact with the model. Features include:
+- High-performance vLLM inference
+- Temperature control  
+- Token limit adjustment
+- Conversation history
+
+Example prompts:
+- "Explain quantum computing in simple terms"
+- "Write a Python function to sort a list"
+- "Tell me a story about a robot"
+
+## 🔧 Configuration
+
+The model is configured with the following settings:
+- **Engine**: vLLM with PagedAttention
+- **Device**: CUDA (Ampere+ GPU required)
+- **Cache Directory**: `/app/cache`
+- **Model Loading**: Automatic on startup
+
+## 📈 Monitoring
+
+Check the health endpoint for:
+- Model load status
+- GPU availability
+- Current device being used
+- Application health
+
+## 🐛 Troubleshooting
+
+If you experience issues:
+
+1. **Model not loading**: Check GPU memory availability
+2. **Slow inference**: Verify GPU is being used (check `/health`)
+3. **Out of memory**: Try a smaller model or reduce batch size
+
+## 🔗 Links
+
+- **GitHub Repository**: https://github.com/{{ github_org | default('thinkube') }}/{{ project_name }}
+- **Gitea Repository**: https://git.{{ domain_name }}/{{ github_org | default('thinkube') }}-apps/{{ project_name }}
+- **Model Page**: https://huggingface.co/{{ model_id }}
+
+## 🤖 Generated with [Thinkube](https://github.com/thinkube/thinkube)
