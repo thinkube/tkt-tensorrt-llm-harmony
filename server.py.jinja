@@ -18,9 +18,9 @@ MODEL_ID = "{{ model_id }}"
 app = FastAPI(title="{{ project_name }} TensorRT-LLM Server")
 
 # OpenAI client pointing to local TensorRT-LLM server
-# trtllm-serve provides OpenAI-compatible API on port 8000
+# trtllm-serve provides OpenAI-compatible API on port 8355
 client = OpenAI(
-    base_url="http://localhost:8000/v1",
+    base_url="http://localhost:8355/v1",
     api_key="dummy-key"  # TensorRT-LLM doesn't require real API key
 )
 

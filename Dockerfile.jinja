@@ -23,18 +23,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 ENV MODEL_ID="{{ model_id }}"
 ENV HF_TOKEN="${HF_TOKEN}"
 
-# Engine paths
-ENV ENGINE_DIR="/app/engines"
-ENV CACHE_DIR="/app/cache"
-
-# Create directories
-RUN mkdir -p ${ENGINE_DIR} ${CACHE_DIR}
-
 # Make entrypoint executable
 RUN chmod +x entrypoint.sh
 
-# Expose ports: 7860 for Gradio, 8000 for TensorRT-LLM API
-EXPOSE 7860 8000
+# Expose ports: 7860 for Gradio, 8355 for TensorRT-LLM API
+EXPOSE 7860 8355
 
 # Run the entrypoint script
 CMD ["./entrypoint.sh"]

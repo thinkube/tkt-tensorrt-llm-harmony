@@ -3,50 +3,39 @@ set -e
 
 echo "=== TensorRT-LLM Inference Server Startup ==="
 echo "Model: ${MODEL_ID}"
-echo "Engine directory: ${ENGINE_DIR}"
 
-# Check if engine already exists
-ENGINE_PATH="${ENGINE_DIR}/$(echo ${MODEL_ID} | tr '/' '_')"
+# Download pre-quantized model from HuggingFace
+echo "Downloading pre-quantized model from HuggingFace..."
+hf download "${MODEL_ID}"
 
-if [ -d "${ENGINE_PATH}" ] && [ -f "${ENGINE_PATH}/config.json" ]; then
-    echo "Engine found at ${ENGINE_PATH}, skipping conversion"
-else
-    echo "Engine not found, building from HuggingFace model..."
-    echo "This will take 30+ minutes depending on model size"
-
-    mkdir -p "${ENGINE_PATH}"
-
-    # Convert HuggingFace checkpoint to TensorRT-LLM format
-    python /app/tensorrt_llm/examples/llama/convert_checkpoint.py \
-        --model_dir "${CACHE_DIR}/models--${MODEL_ID/\//_}" \
-        --output_dir "${ENGINE_PATH}/checkpoint" \
-        --dtype float16 \
-        --tp_size 1
-
-    # Build TensorRT engine
-    trtllm-build \
-        --checkpoint_dir "${ENGINE_PATH}/checkpoint" \
-        --output_dir "${ENGINE_PATH}" \
-        --gemm_plugin auto \
-        --max_batch_size 8 \
-        --max_input_len 2048 \
-        --max_output_len 2048
-
-    echo "Engine built successfully at ${ENGINE_PATH}"
-fi
+# Create TensorRT-LLM API config following NVIDIA single-node serving pattern
+cat > /tmp/extra-llm-api-config.yml <<EOF
+print_iter_log: false
+kv_cache_config:
+  dtype: "auto"
+  free_gpu_memory_fraction: 0.9
+cuda_graph_config:
+  enable_padding: true
+disable_overlap_scheduler: true
+EOF
 
 # Start TensorRT-LLM server in background
-echo "Starting TensorRT-LLM OpenAI-compatible server on port 8000..."
-trtllm-serve "${ENGINE_PATH}" --port 8000 --host 0.0.0.0 &
+echo "Starting TensorRT-LLM OpenAI-compatible server on port 8355..."
+trtllm-serve "${MODEL_ID}" \
+  --max_batch_size 64 \
+  --trust_remote_code \
+  --port 8355 \
+  --host 0.0.0.0 \
+  --extra_llm_api_options /tmp/extra-llm-api-config.yml &
 
 # Wait for server to be ready
 echo "Waiting for TensorRT-LLM server to start..."
-for i in {1..30}; do
-    if curl -s http://localhost:8000/v1/models >/dev/null 2>&1; then
+for i in {1..60}; do
+    if curl -s http://localhost:8355/v1/models >/dev/null 2>&1; then
         echo "TensorRT-LLM server is ready"
         break
     fi
-    if [ $i -eq 30 ]; then
+    if [ $i -eq 60 ]; then
         echo "ERROR: TensorRT-LLM server failed to start"
         exit 1
     fi
