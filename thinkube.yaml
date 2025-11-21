@@ -11,22 +11,11 @@ spec:
       size: xlarge
       gpu:
         count: 1
-        memory: "80Gi"  # TensorRT-LLM with NVFP4 can handle large models (e.g., GPT-OSS 120B ~70GB)
+        memory: "80Gi"  # Models loaded directly from MLflow S3 storage
       health: /health
       test:
         enabled: false  # Testing ML models requires GPU, skip in CI/CD
-      volumeMounts:
-        - name: models
-          mountPath: /models
-          readOnly: true  # Inference pods only read models
 
-  # Shared model storage
-  volumes:
-    - name: models
-      persistentVolumeClaim:
-        claimName: thinkube-models  # Shared models PVC (JuiceFS RWX)
-
-  # Routing configuration
   routes:
     - path: /
       to: inference
