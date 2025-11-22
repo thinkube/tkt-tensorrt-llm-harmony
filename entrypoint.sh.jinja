@@ -4,9 +4,9 @@ set -e
 echo "=== TensorRT-LLM Inference Server Startup (MLflow) ==="
 echo "MLflow Model: {{ mlflow_model }}"
 
-# Query MLflow for model S3 location
+# Query MLflow for model S3 location and original HuggingFace model ID
 echo "Querying MLflow Model Registry..."
-MODEL_S3_PATH=$(python3 -c "
+MODEL_INFO=$(python3 -c "
 import os
 import sys
 import requests
@@ -70,19 +70,30 @@ try:
         print(f'ERROR: Unexpected source format: {source}', file=sys.stderr)
         sys.exit(1)
 
-    print(s3_path)
+    # Get original HuggingFace model ID from run parameters
+    run = client.get_run(run_id)
+    original_model_id = run.data.params.get('model_id')
+    if not original_model_id:
+        print(f'ERROR: model_id parameter not found in run {run_id}', file=sys.stderr)
+        sys.exit(1)
+
+    print(f'{s3_path}|{original_model_id}')
 
 except Exception as e:
     print(f'ERROR: Failed to query MLflow: {e}', file=sys.stderr)
     sys.exit(1)
 ")
 
-if [ $? -ne 0 ] || [ -z "$MODEL_S3_PATH" ]; then
-    echo "ERROR: Failed to get model S3 path from MLflow"
+if [ $? -ne 0 ] || [ -z "$MODEL_INFO" ]; then
+    echo "ERROR: Failed to get model info from MLflow"
     exit 1
 fi
 
+MODEL_S3_PATH=$(echo "$MODEL_INFO" | cut -d'|' -f1)
+ORIGINAL_MODEL_ID=$(echo "$MODEL_INFO" | cut -d'|' -f2)
+
 echo "✓ Model S3 Path: $MODEL_S3_PATH"
+echo "✓ Original HuggingFace Model ID: $ORIGINAL_MODEL_ID"
 
 # Map S3 path to JuiceFS mount path
 # JuiceFS Gateway strips bucket name, so S3 "mlflow" bucket → POSIX root
@@ -96,15 +107,14 @@ echo "✓ JuiceFS Model Path: $JUICEFS_MODEL_PATH"
 # By creating cache structure, TensorRT-LLM thinks model is already cached
 echo "Creating HuggingFace cache symlink..."
 HF_CACHE_DIR="$HOME/.cache/huggingface/hub"
-MODEL_NAME="{{ mlflow_model }}"
-# Convert model name to cache directory format (e.g., "org/model" → "models--org--model")
-CACHE_MODEL_DIR="$HF_CACHE_DIR/models--$(echo $MODEL_NAME | tr '/' '--')"
+# Convert model ID to cache directory format (e.g., "nvidia/model" → "models--nvidia--model")
+CACHE_MODEL_DIR="$HF_CACHE_DIR/models--$(echo $ORIGINAL_MODEL_ID | tr '/' '--')"
 mkdir -p "$CACHE_MODEL_DIR/snapshots"
 ln -sf "$JUICEFS_MODEL_PATH" "$CACHE_MODEL_DIR/snapshots/main"
 echo "✓ Created symlink: $CACHE_MODEL_DIR/snapshots/main → $JUICEFS_MODEL_PATH"
 
-# Use model name (not path) - TensorRT-LLM will find it in cache
-LOCAL_MODEL_PATH="$MODEL_NAME"
+# Use original HuggingFace model ID (not path) - TensorRT-LLM will find it in cache
+LOCAL_MODEL_PATH="$ORIGINAL_MODEL_ID"
 echo "✓ Model reference: $LOCAL_MODEL_PATH (will load from cache)"
 
 # Create TensorRT-LLM API config
