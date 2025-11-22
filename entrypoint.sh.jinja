@@ -138,15 +138,15 @@ trtllm-serve "$LOCAL_MODEL_PATH" \
   --host 0.0.0.0 \
   --extra_llm_api_options /tmp/extra-llm-api-config.yml &
 
-# Wait for server to be ready (10 minutes for large FP4 models)
+# Wait for server to be ready (30 minutes for large FP4 models)
 echo "Waiting for TensorRT-LLM server to start..."
-for i in {1..300}; do
+for i in {1..900}; do
     if curl -s http://localhost:8355/v1/models >/dev/null 2>&1; then
         echo "✓ TensorRT-LLM server is ready"
         break
     fi
-    if [ $i -eq 300 ]; then
-        echo "ERROR: TensorRT-LLM server failed to start (timeout after 10 minutes)"
+    if [ $i -eq 900 ]; then
+        echo "ERROR: TensorRT-LLM server failed to start (timeout after 30 minutes)"
         exit 1
     fi
     sleep 2

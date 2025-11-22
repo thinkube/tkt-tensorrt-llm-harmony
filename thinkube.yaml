@@ -15,6 +15,7 @@ spec:
       build: .
       port: 7860
       size: xlarge
+      ipc: host  # Unlimited shared memory for PyTorch/TensorRT-LLM model loading
       gpu:
         count: 1
         memory: "80Gi"  # Models loaded directly from JuiceFS POSIX mount
