@@ -1,121 +1,16 @@
 #!/bin/bash
 set -e
 
-echo "=== TensorRT-LLM Inference Server Startup (MLflow) ==="
-echo "MLflow Model: {{ mlflow_model }}"
+echo "=== TensorRT-LLM Inference Server Startup ===\"
+echo "Model: {{ model_id }}"
 
-# Query MLflow for model S3 location and original HuggingFace model ID
-echo "Querying MLflow Model Registry..."
-MODEL_INFO=$(python3 -c "
-import os
-import sys
-import requests
-import mlflow
-import urllib3
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# Configure HuggingFace to use the shared JuiceFS cache
+# The model mirroring workflow created persistent symlinks at:
+# /mlflow-models/.cache/huggingface/hub/models--{org}--{model}/snapshots/main
+export HF_HOME="/mlflow-models/.cache"
+export HF_HUB_CACHE="/mlflow-models/.cache/huggingface/hub"
 
-# Get credentials from environment
-keycloak_secret = os.environ.get('MLFLOW_CLIENT_SECRET')
-admin_password = os.environ.get('ADMIN_PASSWORD')
-domain = '{{ domain_name }}'
-
-if not keycloak_secret or not admin_password:
-    print('ERROR: Missing MLFLOW_CLIENT_SECRET or ADMIN_PASSWORD', file=sys.stderr)
-    sys.exit(1)
-
-# Authenticate with Keycloak
-token_url = f'https://auth.{domain}/realms/thinkube/protocol/openid-connect/token'
-try:
-    response = requests.post(token_url, data={
-        'grant_type': 'password',
-        'client_id': 'mlflow',
-        'client_secret': keycloak_secret,
-        'username': 'thinkube',
-        'password': admin_password
-    }, verify=False, timeout=30)
-    response.raise_for_status()
-    token = response.json()['access_token']
-except Exception as e:
-    print(f'ERROR: Failed to authenticate with Keycloak: {e}', file=sys.stderr)
-    sys.exit(1)
-
-# Configure MLflow
-os.environ['MLFLOW_TRACKING_TOKEN'] = token
-os.environ['MLFLOW_TRACKING_URI'] = 'http://mlflow.mlflow.svc.cluster.local:5000'
-os.environ['MLFLOW_S3_ENDPOINT_URL'] = 'http://juicefs-mlflow-gateway.juicefs.svc.cluster.local:9001'
-os.environ['MLFLOW_S3_IGNORE_TLS'] = 'true'
-os.environ['AWS_ACCESS_KEY_ID'] = 'tkadmin'
-os.environ['AWS_SECRET_ACCESS_KEY'] = admin_password
-
-# Get model from MLflow
-try:
-    client = mlflow.MlflowClient()
-    model_name = '{{ mlflow_model }}'
-
-    # Get latest version
-    versions = client.search_model_versions(f\"name='{model_name}'\")
-    if not versions:
-        print(f'ERROR: Model {model_name} not found in MLflow', file=sys.stderr)
-        sys.exit(1)
-
-    latest = max(versions, key=lambda v: int(v.version))
-
-    # Extract S3 path from source (format: runs:/run_id/model)
-    source = latest.source
-    if source.startswith('runs:/'):
-        run_id = source.split('/')[1]
-        # MLflow stores at: s3://mlflow/artifacts/run_id/artifacts/model
-        s3_path = f's3://mlflow/artifacts/{run_id}/artifacts/model'
-    else:
-        print(f'ERROR: Unexpected source format: {source}', file=sys.stderr)
-        sys.exit(1)
-
-    # Get original HuggingFace model ID from run parameters
-    run = client.get_run(run_id)
-    original_model_id = run.data.params.get('model_id')
-    if not original_model_id:
-        print(f'ERROR: model_id parameter not found in run {run_id}', file=sys.stderr)
-        sys.exit(1)
-
-    print(f'{s3_path}|{original_model_id}')
-
-except Exception as e:
-    print(f'ERROR: Failed to query MLflow: {e}', file=sys.stderr)
-    sys.exit(1)
-")
-
-if [ $? -ne 0 ] || [ -z "$MODEL_INFO" ]; then
-    echo "ERROR: Failed to get model info from MLflow"
-    exit 1
-fi
-
-MODEL_S3_PATH=$(echo "$MODEL_INFO" | cut -d'|' -f1)
-ORIGINAL_MODEL_ID=$(echo "$MODEL_INFO" | cut -d'|' -f2)
-
-echo "✓ Model S3 Path: $MODEL_S3_PATH"
-echo "✓ Original HuggingFace Model ID: $ORIGINAL_MODEL_ID"
-
-# Map S3 path to JuiceFS mount path
-# JuiceFS Gateway strips bucket name, so S3 "mlflow" bucket → POSIX root
-# S3 path: s3://mlflow/artifacts/RUN_ID/artifacts/model
-# JuiceFS path: /mlflow-models/artifacts/RUN_ID/artifacts/model (bucket name stripped, auto-mounted for GPU containers)
-JUICEFS_MODEL_PATH=$(echo "$MODEL_S3_PATH" | sed 's|s3://mlflow|/mlflow-models|')
-echo "✓ JuiceFS Model Path: $JUICEFS_MODEL_PATH"
-
-# Create HuggingFace cache symlink structure
-# TensorRT-LLM CLI treats paths as strings and tries HF Hub download
-# By creating cache structure, TensorRT-LLM thinks model is already cached
-echo "Creating HuggingFace cache symlink..."
-HF_CACHE_DIR="$HOME/.cache/huggingface/hub"
-# Convert model ID to cache directory format (e.g., "nvidia/model" → "models--nvidia--model")
-CACHE_MODEL_DIR="$HF_CACHE_DIR/models--$(echo $ORIGINAL_MODEL_ID | sed 's|/|--|g')"
-mkdir -p "$CACHE_MODEL_DIR/snapshots"
-ln -sf "$JUICEFS_MODEL_PATH" "$CACHE_MODEL_DIR/snapshots/main"
-echo "✓ Created symlink: $CACHE_MODEL_DIR/snapshots/main → $JUICEFS_MODEL_PATH"
-
-# Use original HuggingFace model ID (not path) - TensorRT-LLM will find it in cache
-LOCAL_MODEL_PATH="$ORIGINAL_MODEL_ID"
-echo "✓ Model reference: $LOCAL_MODEL_PATH (will load from cache)"
+echo "Using shared HuggingFace cache on JuiceFS: $HF_HUB_CACHE"
 
 # Create TensorRT-LLM API config
 cat > /tmp/extra-llm-api-config.yml <<EOF
@@ -128,9 +23,10 @@ cuda_graph_config:
 disable_overlap_scheduler: true
 EOF
 
-# Start TensorRT-LLM server in background (loading from HF cache symlink → JuiceFS POSIX!)
-echo "Starting TensorRT-LLM server (loading via HF cache symlink)..."
-trtllm-serve "$LOCAL_MODEL_PATH" \
+# Start TensorRT-LLM server
+# Model is loaded from JuiceFS via persistent HF cache symlink - no download needed!
+echo "Starting TensorRT-LLM server..."
+trtllm-serve "{{ model_id }}" \
   --backend pytorch \
   --max_batch_size 64 \
   --trust_remote_code \
@@ -138,7 +34,7 @@ trtllm-serve "$LOCAL_MODEL_PATH" \
   --host 0.0.0.0 \
   --extra_llm_api_options /tmp/extra-llm-api-config.yml &
 
-# Wait for server to be ready (30 minutes for large FP4 models)
+# Wait for server to be ready (30 minutes for large models)
 echo "Waiting for TensorRT-LLM server to start..."
 for i in {1..900}; do
     if curl -s http://localhost:8355/v1/models >/dev/null 2>&1; then

@@ -9,9 +9,9 @@ metadata:
   tags: ["ai", "llm", "tensorrt-llm", "nvidia", "gradio", "inference", "text-generation", "gpu", "mlflow"]
 
 parameters:
-  - name: mlflow_model
+  - name: model_id
     type: str
-    description: MLflow model name from Model Registry (e.g., nvidia-Phi-4-multimodal-instruct-FP4)
-    default: "nvidia-Phi-4-multimodal-instruct-FP4"
-    pattern: "^[a-zA-Z0-9_-]+$"
+    description: HuggingFace model ID (e.g., nvidia/Phi-4-multimodal-instruct-FP4)
+    default: "nvidia/Phi-4-multimodal-instruct-FP4"
+    pattern: "^[a-zA-Z0-9_/-]+$"
     
