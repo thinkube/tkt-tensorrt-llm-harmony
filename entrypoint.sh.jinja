@@ -72,11 +72,15 @@ else:
 
 hf_model_slug = f'models--{org}--{model_name_hf}'
 hf_snapshots_dir = f'/mlflow-models/.cache/huggingface/hub/{hf_model_slug}/snapshots'
-hf_snapshot_link = f'{hf_snapshots_dir}/main'
 
 # Get artifact path from run_id
 # Models are stored at: /mlflow-models/artifacts/{run_id}/artifacts/model
 target_path = f'/mlflow-models/artifacts/{run_id}/artifacts/model'
+
+# Use run_id as fake commit hash (HuggingFace expects commit hash, not "main")
+# Pad to 40 chars (standard git SHA-1 length) for compatibility
+fake_commit = (run_id + '0' * 40)[:40]
+hf_snapshot_link = f'{hf_snapshots_dir}/{fake_commit}'
 
 # Create directory structure
 os.makedirs(hf_snapshots_dir, exist_ok=True)
@@ -88,11 +92,11 @@ os.symlink(target_path, hf_snapshot_link)
 
 print(f"✓ Created symlink: {hf_snapshot_link} -> {target_path}")
 
-# Also create refs/main for HuggingFace cache compatibility
+# Create refs/main pointing to our fake commit hash
 hf_refs_dir = f'/mlflow-models/.cache/huggingface/hub/{hf_model_slug}/refs'
 os.makedirs(hf_refs_dir, exist_ok=True)
 with open(f'{hf_refs_dir}/main', 'w') as f:
-    f.write('main')
+    f.write(fake_commit)
 PYTHON_SCRIPT
 
 if [ $? -ne 0 ]; then
