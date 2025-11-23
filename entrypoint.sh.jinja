@@ -40,7 +40,7 @@ access_token = token_response.json()['access_token']
 # Query MLflow for model
 model_id = "{{ model_id }}"
 model_name = model_id.replace('/', '-')
-mlflow_url = os.environ.get('MLFLOW_TRACKING_URI', 'http://mlflow.mlflow.svc.cluster.local')
+mlflow_url = os.environ.get('MLFLOW_TRACKING_URI', 'http://mlflow.mlflow.svc.cluster.local:5000')
 
 response = requests.get(
     f"{mlflow_url}/api/2.0/mlflow/model-versions/search",
