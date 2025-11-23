@@ -15,32 +15,6 @@ spec:
       health: /health
       test:
         enabled: false  # Testing ML models requires GPU, skip in CI/CD
-      env:
-        - name: MLFLOW_KEYCLOAK_TOKEN_URL
-          valueFrom:
-            secretKeyRef:
-              name: mlflow-auth-config
-              key: keycloak-token-url
-        - name: MLFLOW_KEYCLOAK_CLIENT_ID
-          valueFrom:
-            secretKeyRef:
-              name: mlflow-auth-config
-              key: client-id
-        - name: MLFLOW_CLIENT_SECRET
-          valueFrom:
-            secretKeyRef:
-              name: mlflow-auth-config
-              key: client-secret
-        - name: MLFLOW_AUTH_USERNAME
-          valueFrom:
-            secretKeyRef:
-              name: mlflow-auth-config
-              key: username
-        - name: MLFLOW_AUTH_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: mlflow-auth-config
-              key: password
 
   routes:
     - path: /
