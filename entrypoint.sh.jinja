@@ -14,7 +14,7 @@ echo "Models will be loaded from MLflow artifacts on JuiceFS"
 
 # Query MLflow to get the run_id for the latest version of this model
 echo "Querying MLflow for model location..."
-python3 << 'PYTHON_SCRIPT'
+MODEL_PATH=$(python3 << 'PYTHON_SCRIPT'
 import os
 import sys
 import requests
@@ -60,49 +60,30 @@ if not versions:
 latest = max(versions, key=lambda v: int(v['version']))
 run_id = latest['run_id']
 
-print(f"Found model version {latest['version']} with run_id: {run_id}")
-
-# Create HuggingFace cache symlink
-model_parts = model_id.split('/')
-if len(model_parts) == 2:
-    org, model_name_hf = model_parts
-else:
-    org = 'models'
-    model_name_hf = model_id
-
-hf_model_slug = f'models--{org}--{model_name_hf}'
-hf_snapshots_dir = f'/mlflow-models/.cache/huggingface/hub/{hf_model_slug}/snapshots'
+print(f"Found model version {latest['version']} with run_id: {run_id}", file=sys.stderr)
 
 # Get artifact path from run_id
 # Models are stored at: /mlflow-models/artifacts/{run_id}/artifacts/model
-target_path = f'/mlflow-models/artifacts/{run_id}/artifacts/model'
+model_path = f'/mlflow-models/artifacts/{run_id}/artifacts/model'
 
-# Use run_id as fake commit hash (HuggingFace expects commit hash, not "main")
-# Pad to 40 chars (standard git SHA-1 length) for compatibility
-fake_commit = (run_id + '0' * 40)[:40]
-hf_snapshot_link = f'{hf_snapshots_dir}/{fake_commit}'
+# Verify the path exists
+if not os.path.exists(model_path):
+    print(f"ERROR: Model path does not exist: {model_path}", file=sys.stderr)
+    sys.exit(1)
 
-# Create directory structure
-os.makedirs(hf_snapshots_dir, exist_ok=True)
+print(f"✓ Model found at: {model_path}", file=sys.stderr)
 
-# Create symlink (remove if exists)
-if os.path.exists(hf_snapshot_link) or os.path.islink(hf_snapshot_link):
-    os.unlink(hf_snapshot_link)
-os.symlink(target_path, hf_snapshot_link)
-
-print(f"✓ Created symlink: {hf_snapshot_link} -> {target_path}")
-
-# Create refs/main pointing to our fake commit hash
-hf_refs_dir = f'/mlflow-models/.cache/huggingface/hub/{hf_model_slug}/refs'
-os.makedirs(hf_refs_dir, exist_ok=True)
-with open(f'{hf_refs_dir}/main', 'w') as f:
-    f.write(fake_commit)
+# Output the path to stdout (captured by shell)
+print(model_path)
 PYTHON_SCRIPT
+)
 
 if [ $? -ne 0 ]; then
-    echo "ERROR: Failed to setup model symlink"
+    echo "ERROR: Failed to locate model in MLflow"
     exit 1
 fi
+
+echo "Using model path: $MODEL_PATH"
 
 # Create TensorRT-LLM API config
 cat > /tmp/extra-llm-api-config.yml <<EOF
@@ -116,9 +97,9 @@ disable_overlap_scheduler: true
 EOF
 
 # Start TensorRT-LLM server
-# Model is loaded from JuiceFS via persistent HF cache symlink - no download needed!
+# Model is loaded directly from JuiceFS path - no download needed!
 echo "Starting TensorRT-LLM server..."
-trtllm-serve "{{ model_id }}" \
+trtllm-serve "$MODEL_PATH" \
   --backend pytorch \
   --max_batch_size 64 \
   --trust_remote_code \
