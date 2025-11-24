@@ -14,7 +14,7 @@ parameters:
     description: Select a downloaded TensorRT model
     dynamic_source: "model_catalog"
     filter:
-      server_type: "tensorrt"
+      server_type: "tensorrt-llm"
       is_downloaded: true
     default: "nvidia/Phi-4-multimodal-instruct-FP4"
     
