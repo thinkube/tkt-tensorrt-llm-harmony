@@ -2,57 +2,56 @@
 """
 TensorRT-LLM Inference Server with Gradio UI
 For text generation models with NVFP4 support on Blackwell (DGX Spark GB10)
+Uses TensorRT-LLM Python API for direct model loading
 """
 
 import os
 import gradio as gr
 from fastapi import FastAPI
 import uvicorn
-from openai import OpenAI
+from tensorrt_llm import LLM, SamplingParams
 from thinkube_theme import create_thinkube_theme, THINKUBE_CSS
 
 # Model configuration from template parameter
 MODEL_ID = "{{ model_id }}"
+MODEL_PATH = os.environ.get('MODEL_PATH')
 
 # Initialize FastAPI app
 app = FastAPI(title="{{ project_name }} TensorRT-LLM Server")
 
-# OpenAI client pointing to local TensorRT-LLM server
-# trtllm-serve provides OpenAI-compatible API on port 8355
-client = OpenAI(
-    base_url="http://localhost:8355/v1",
-    api_key="dummy-key"  # TensorRT-LLM doesn't require real API key
-)
+# Initialize TensorRT-LLM with Python API
+# This handles vocab files, tokenization, and engine building automatically
+print(f"Loading model from: {MODEL_PATH}")
+print(f"Model ID: {MODEL_ID}")
 
-print(f"Connecting to TensorRT-LLM server for model: {MODEL_ID}")
+llm = LLM(model=MODEL_PATH)
+
+print(f"✓ TensorRT-LLM model loaded successfully")
 
 def generate_response(message: str, history: list, temperature: float = 0.7, max_tokens: int = 512):
-    """Generate response using TensorRT-LLM via OpenAI-compatible API"""
-    # Build messages from history
-    messages = []
+    """Generate response using TensorRT-LLM Python API"""
+    # Build conversation context from history
+    conversation = []
     for human, assistant in history:
-        messages.append({"role": "user", "content": human})
-        messages.append({"role": "assistant", "content": assistant})
-    messages.append({"role": "user", "content": message})
+        conversation.append(f"User: {human}\nAssistant: {assistant}")
 
-    # Generate with TensorRT-LLM
-    stream = client.chat.completions.create(
-        model=MODEL_ID,
-        messages=messages,
+    # Add current message
+    conversation.append(f"User: {message}\nAssistant:")
+    prompt = "\n\n".join(conversation)
+
+    # Configure sampling parameters
+    sampling_params = SamplingParams(
         temperature=temperature,
         max_tokens=max_tokens,
-        top_p=0.9,
-        frequency_penalty=0.5,  # Penalize token repetition
-        presence_penalty=0.5,   # Penalize topic repetition
-        stream=True
+        top_p=0.9
     )
 
-    # Stream response for Gradio
-    response = ""
-    for chunk in stream:
-        if chunk.choices[0].delta.content is not None:
-            response += chunk.choices[0].delta.content
-            yield response
+    # Generate with TensorRT-LLM Python API
+    outputs = llm.generate([prompt], sampling_params)
+
+    # Extract response
+    response = outputs[0].outputs[0].text
+    yield response
 
 # Create Thinkube-styled Gradio interface
 thinkube_theme = create_thinkube_theme()
@@ -79,12 +78,12 @@ demo = gr.ChatInterface(
 @app.get("/health")
 async def health_check():
     try:
-        # Check if TensorRT-LLM server is responding
-        models = client.models.list()
+        # Check if model is loaded
         return {
             "status": "healthy",
             "model": MODEL_ID,
-            "engine": "TensorRT-LLM"
+            "model_path": MODEL_PATH,
+            "engine": "TensorRT-LLM (Python API)"
         }
     except Exception as e:
         return {

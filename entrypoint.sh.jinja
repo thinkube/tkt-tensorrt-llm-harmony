@@ -85,42 +85,11 @@ fi
 
 echo "Using model path: $MODEL_PATH"
 
-# Create TensorRT-LLM API config
-cat > /tmp/extra-llm-api-config.yml <<EOF
-print_iter_log: false
-kv_cache_config:
-  dtype: "auto"
-  free_gpu_memory_fraction: 0.9
-cuda_graph_config:
-  enable_padding: true
-disable_overlap_scheduler: true
-EOF
+# Export MODEL_PATH for Python server to use
+export MODEL_PATH
 
-# Start TensorRT-LLM server
-# Model is loaded directly from JuiceFS path - no download needed!
-echo "Starting TensorRT-LLM server..."
-trtllm-serve "$MODEL_PATH" \
-  --backend pytorch \
-  --max_batch_size 64 \
-  --trust_remote_code \
-  --port 8355 \
-  --host 0.0.0.0 \
-  --extra_llm_api_options /tmp/extra-llm-api-config.yml &
-
-# Wait for server to be ready (30 minutes for large models)
-echo "Waiting for TensorRT-LLM server to start..."
-for i in {1..900}; do
-    if curl -s http://localhost:8355/v1/models >/dev/null 2>&1; then
-        echo "✓ TensorRT-LLM server is ready"
-        break
-    fi
-    if [ $i -eq 900 ]; then
-        echo "ERROR: TensorRT-LLM server failed to start (timeout after 30 minutes)"
-        exit 1
-    fi
-    sleep 2
-done
-
-# Start Gradio UI
-echo "Starting Gradio UI on port 7860..."
+# Start Gradio UI with TensorRT-LLM Python API
+# The LLM() class handles model loading, vocab files, and tokenization automatically
+echo "Starting TensorRT-LLM inference server with Python API on port 7860..."
+echo "Model will be loaded directly using tensorrt_llm.LLM() - this may take several minutes..."
 exec python3 server.py
