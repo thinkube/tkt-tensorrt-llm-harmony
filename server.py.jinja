@@ -19,14 +19,16 @@ MODEL_PATH = os.environ.get('MODEL_PATH')
 # Initialize FastAPI app
 app = FastAPI(title="{{ project_name }} TensorRT-LLM Server")
 
-# Initialize TensorRT-LLM with Python API
-# This handles vocab files, tokenization, and engine building automatically
-print(f"Loading model from: {MODEL_PATH}")
-print(f"Model ID: {MODEL_ID}")
+# Global LLM instance (initialized in main block to support MPI)
+llm = None
 
-llm = LLM(model=MODEL_PATH)
-
-print(f"✓ TensorRT-LLM model loaded successfully")
+def initialize_model():
+    """Initialize TensorRT-LLM model (must be called from main block for MPI support)"""
+    global llm
+    print(f"Loading model from: {MODEL_PATH}")
+    print(f"Model ID: {MODEL_ID}")
+    llm = LLM(model=MODEL_PATH)
+    print(f"✓ TensorRT-LLM model loaded successfully")
 
 def generate_response(message: str, history: list, temperature: float = 0.7, max_tokens: int = 512):
     """Generate response using TensorRT-LLM Python API"""
@@ -100,6 +102,9 @@ app = gr.mount_gradio_app(
 )
 
 if __name__ == "__main__":
+    # Initialize model (must be in main block for MPI support)
+    initialize_model()
+
     # Run the server
     uvicorn.run(
         app,
