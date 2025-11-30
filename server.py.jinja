@@ -119,6 +119,40 @@ async def health_check():
 # OpenAI-Compatible API Endpoints (for LiteLLM integration)
 # ============================================================================
 
+import re
+
+def parse_harmony_response(text: str) -> dict:
+    """
+    Parse harmony format response to extract different channels.
+    Harmony format uses channels: analysis (reasoning), commentary (tools), final (response)
+    Returns dict with 'final' (user-facing) and 'reasoning' (chain-of-thought) content.
+    """
+    result = {"final": text, "reasoning": None}
+
+    # Pattern: look for 'final' or 'assistantfinal' marker followed by content
+    # The format concatenates: "analysis<reasoning>assistantfinal<answer>" or similar
+    final_patterns = [
+        r'assistantfinal(.*)$',  # assistantfinal followed by content
+        r'(?:^|[^a-z])final(.*)$',  # final at word boundary followed by content
+    ]
+
+    for pattern in final_patterns:
+        match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+        if match:
+            final_content = match.group(1).strip()
+            if final_content:
+                result["final"] = final_content
+                # Extract reasoning (everything before the final marker)
+                reasoning = text[:match.start()].strip()
+                # Remove 'analysis' prefix if present
+                reasoning = re.sub(r'^analysis\s*', '', reasoning, flags=re.IGNORECASE)
+                if reasoning:
+                    result["reasoning"] = reasoning
+                break
+
+    return result
+
+
 @app.post("/v1/chat/completions")
 async def openai_chat_completions(request: Request):
     """OpenAI-compatible chat completions endpoint using TensorRT-LLM"""
@@ -129,8 +163,9 @@ async def openai_chat_completions(request: Request):
         max_tokens = body.get('max_tokens', 512)
         stream = body.get('stream', False)
         top_p = body.get('top_p', 0.9)
+        include_reasoning = body.get('include_reasoning', False)  # Optional: include chain-of-thought
 
-        # Apply chat template (uses harmony format for Phi-4, chatml for others, etc.)
+        # Apply chat template (uses harmony format for gpt-oss, chatml for others, etc.)
         prompt = tokenizer.apply_chat_template(
             messages,
             tokenize=False,
@@ -146,7 +181,14 @@ async def openai_chat_completions(request: Request):
 
         # Generate with TensorRT-LLM
         outputs = llm.generate([prompt], sampling_params)
-        response_text = outputs[0].outputs[0].text
+        raw_response = outputs[0].outputs[0].text
+
+        # Parse harmony format to extract final response
+        parsed = parse_harmony_response(raw_response)
+        response_text = parsed["final"]
+
+        # Optionally include reasoning in a separate field
+        reasoning_text = parsed["reasoning"] if include_reasoning else None
 
         # Generate unique ID
         completion_id = f"chatcmpl-{int(time.time() * 1000)}"
@@ -190,7 +232,7 @@ async def openai_chat_completions(request: Request):
             )
 
         # Non-streaming response
-        return JSONResponse({
+        response_data = {
             "id": completion_id,
             "object": "chat.completion",
             "created": created,
@@ -208,7 +250,13 @@ async def openai_chat_completions(request: Request):
                 "completion_tokens": 0,
                 "total_tokens": 0
             }
-        })
+        }
+
+        # Optionally include reasoning (chain-of-thought) in response
+        if reasoning_text:
+            response_data["reasoning"] = reasoning_text
+
+        return JSONResponse(response_data)
 
     except Exception as e:
         return JSONResponse(
