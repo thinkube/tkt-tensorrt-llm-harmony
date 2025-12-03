@@ -174,9 +174,9 @@ async def openai_chat_completions(request: Request):
             add_generation_prompt=True
         )
 
-        logger.debug(f"=== API Request ===")
-        logger.debug(f"max_tokens: {max_tokens}, temperature: {temperature}, top_p: {top_p}")
-        logger.debug(f"Prompt length (chars): {len(prompt)}")
+        logger.info(f"=== API Request ===")
+        logger.info(f"max_tokens: {max_tokens}, temperature: {temperature}, top_p: {top_p}")
+        logger.info(f"Prompt length (chars): {len(prompt)}")
 
         # Configure sampling parameters
         sampling_params = SamplingParams(
