@@ -72,9 +72,10 @@ def generate_response(message: str, history: list, temperature: float = 0.7, max
     # Generate with TensorRT-LLM Python API
     outputs = llm.generate([prompt], sampling_params)
 
-    # Extract response
-    response = outputs[0].outputs[0].text
-    yield response
+    # Extract and parse response (remove harmony format reasoning)
+    raw_response = outputs[0].outputs[0].text
+    parsed = parse_harmony_response(raw_response)
+    yield parsed["final"]
 
 # Create Thinkube-styled Gradio interface
 thinkube_theme = create_thinkube_theme()
