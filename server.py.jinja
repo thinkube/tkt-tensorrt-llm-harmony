@@ -303,9 +303,9 @@ async def openai_models():
 # Batch Completions Endpoint (for parallel data generation)
 # ============================================================================
 
-# DGX Spark unified memory constraint: 20B model leaves limited headroom
-# Batch size 2 with 800 max_tokens is safe; larger batches processed in chunks
-MAX_BATCH_SIZE = 2
+# DGX Spark unified memory (128GB): 20B NVFP4 model uses ~15GB, leaving ~100GB for KV cache
+# With 80Gi pod memory limit, batch size 8 is safe for 800 max_tokens
+MAX_BATCH_SIZE = 8
 
 @app.post("/v1/batch/completions")
 async def batch_completions(request: Request):
