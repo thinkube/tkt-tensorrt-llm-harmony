@@ -381,10 +381,15 @@ async def batch_completions(request: Request):
         chunks_processed = 0
 
         import asyncio
+        from concurrent.futures import ThreadPoolExecutor
 
-        # Define async helper outside loop to avoid closure issues
-        async def generate_one(prompt, params):
-            return await llm.generate_async(prompt, params)
+        # Use thread pool to run sync generate() without blocking event loop
+        # This preserves true GPU batching while being async-compatible
+        executor = ThreadPoolExecutor(max_workers=1)
+
+        def sync_generate_batch(prompts, params):
+            """Run sync generate in thread to avoid blocking uvicorn event loop"""
+            return llm.generate(prompts, params)
 
         for i in range(0, total_requests, MAX_BATCH_SIZE):
             chunk_prompts = all_prompts[i:i + MAX_BATCH_SIZE]
@@ -396,9 +401,15 @@ async def batch_completions(request: Request):
             # Use first request's params for this chunk (TensorRT-LLM batches internally)
             batch_sampling_params = chunk_params[0]
 
-            # Generate this chunk using async API to avoid sync/async conflict with uvicorn
-            tasks = [generate_one(p, batch_sampling_params) for p in chunk_prompts]
-            outputs = await asyncio.gather(*tasks)
+            # Run sync generate in thread pool to preserve true GPU batching
+            # while not blocking the uvicorn event loop
+            loop = asyncio.get_event_loop()
+            outputs = await loop.run_in_executor(
+                executor,
+                sync_generate_batch,
+                chunk_prompts,
+                batch_sampling_params
+            )
 
             # Process responses
             for output in outputs:
