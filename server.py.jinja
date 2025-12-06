@@ -382,6 +382,10 @@ async def batch_completions(request: Request):
 
         import asyncio
 
+        # Define async helper outside loop to avoid closure issues
+        async def generate_one(prompt, params):
+            return await llm.generate_async(prompt, params)
+
         for i in range(0, total_requests, MAX_BATCH_SIZE):
             chunk_prompts = all_prompts[i:i + MAX_BATCH_SIZE]
             chunk_params = all_params[i:i + MAX_BATCH_SIZE]
@@ -393,10 +397,6 @@ async def batch_completions(request: Request):
             batch_sampling_params = chunk_params[0]
 
             # Generate this chunk using async API to avoid sync/async conflict with uvicorn
-            # Process each prompt with generate_async and gather results
-            async def generate_one(prompt, params):
-                return await llm.generate_async(prompt, params)
-
             tasks = [generate_one(p, batch_sampling_params) for p in chunk_prompts]
             outputs = await asyncio.gather(*tasks)
 
