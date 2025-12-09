@@ -81,8 +81,9 @@ def generate_response(message: str, history: list, temperature: float = 0.7, max
     outputs = llm.generate([prompt], sampling_params)
 
     # Extract and parse response (remove harmony format reasoning)
-    raw_response = outputs[0].outputs[0].text
-    parsed = parse_harmony_response(raw_response)
+    raw_text = outputs[0].outputs[0].text
+    token_ids = outputs[0].outputs[0].token_ids
+    parsed = parse_harmony_response(token_ids, fallback_text=raw_text)
     yield parsed["final"]
 
 # Create Thinkube-styled Gradio interface
@@ -132,19 +133,22 @@ async def health_check():
 _harmony_enc = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
 
 
-def parse_harmony_response(text: str) -> dict:
+def parse_harmony_response(token_ids: list, fallback_text: str = "") -> dict:
     """
     Parse harmony format response to extract different channels.
-    Uses the official openai-harmony package.
+    Uses the official openai-harmony package with raw token IDs.
     Returns dict with 'final' (user-facing) and 'reasoning' (chain-of-thought) content.
+
+    Args:
+        token_ids: Raw token IDs from TensorRT-LLM output
+        fallback_text: Detokenized text to use if parsing fails
     """
-    result = {"final": text, "reasoning": None}
+    result = {"final": fallback_text, "reasoning": None}
 
     try:
-        # Tokenize the text and parse
-        tokens = _harmony_enc.encode(text)
+        # Parse directly from token IDs (not re-encoded text)
         messages = _harmony_enc.parse_messages_from_completion_tokens(
-            tokens, role=Role.ASSISTANT, strict=False
+            token_ids, role=Role.ASSISTANT, strict=False
         )
 
         # Extract content by channel
@@ -271,9 +275,10 @@ async def _handle_batch_completions(body: dict, batch_requests: list):
 
         # Process responses
         for j, output in enumerate(outputs):
-            raw_response = output.outputs[0].text
+            raw_text = output.outputs[0].text
+            token_ids = output.outputs[0].token_ids
             finish_reason = getattr(output.outputs[0], 'finish_reason', 'stop')
-            parsed = parse_harmony_response(raw_response)
+            parsed = parse_harmony_response(token_ids, fallback_text=raw_text)
 
             choice = {
                 "index": i + j,
@@ -369,16 +374,17 @@ async def openai_chat_completions(request: Request):
 
         # Generate with TensorRT-LLM (async to handle concurrent requests)
         output = await llm.generate_async(prompt, sampling_params)
-        raw_response = output.outputs[0].text
+        raw_text = output.outputs[0].text
+        token_ids = output.outputs[0].token_ids
         finish_reason = getattr(output.outputs[0], 'finish_reason', 'unknown')
 
         logger.info(f"=== Raw Response ===")
-        logger.info(f"Length (chars): {len(raw_response)}")
+        logger.info(f"Length (chars): {len(raw_text)}, tokens: {len(token_ids)}")
         logger.info(f"Finish reason: {finish_reason}")
-        logger.info(f"RAW_RESPONSE_START>>>{raw_response}<<<RAW_RESPONSE_END")
+        logger.info(f"RAW_RESPONSE_START>>>{raw_text}<<<RAW_RESPONSE_END")
 
-        # Parse harmony format to extract final response
-        parsed = parse_harmony_response(raw_response)
+        # Parse harmony format to extract final response (using raw token IDs)
+        parsed = parse_harmony_response(token_ids, fallback_text=raw_text)
         response_text = parsed["final"]
 
         logger.info(f"=== Parsed Response ===")
@@ -595,9 +601,10 @@ async def batch_completions(request: Request):
 
             # Process responses
             for output in outputs:
-                raw_response = output.outputs[0].text
+                raw_text = output.outputs[0].text
+                token_ids = output.outputs[0].token_ids
                 finish_reason = getattr(output.outputs[0], 'finish_reason', 'stop')
-                parsed = parse_harmony_response(raw_response)
+                parsed = parse_harmony_response(token_ids, fallback_text=raw_text)
 
                 all_responses.append({
                     "content": parsed["final"],
