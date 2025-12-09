@@ -143,41 +143,29 @@ def parse_harmony_response(text: str) -> dict:
     Args:
         text: Raw text from TensorRT-LLM output (with skip_special_tokens=False)
     """
-    result = {"final": text, "reasoning": None}
+    tokens = _harmony_enc.encode(text, allowed_special="all")
+    messages = _harmony_enc.parse_messages_from_completion_tokens(
+        tokens, role=Role.ASSISTANT, strict=False
+    )
 
-    try:
-        # Encode text to tokens, allowing harmony special tokens
-        tokens = _harmony_enc.encode(text, allowed_special="all")
-        # Parse the tokens into messages
-        messages = _harmony_enc.parse_messages_from_completion_tokens(
-            tokens, role=Role.ASSISTANT, strict=False
-        )
+    final_parts = []
+    reasoning_parts = []
 
-        # Extract content by channel
-        final_parts = []
-        reasoning_parts = []
+    for msg in messages:
+        channel = getattr(msg, 'channel', None)
+        content = msg.content
+        if isinstance(content, list):
+            content = ''.join(str(c) for c in content)
 
-        for msg in messages:
-            channel = getattr(msg, 'channel', None)
-            content = getattr(msg, 'content', '')
+        if channel == 'final':
+            final_parts.append(content)
+        elif channel == 'analysis':
+            reasoning_parts.append(content)
 
-            if channel == 'final':
-                final_parts.append(content)
-            elif channel == 'analysis':
-                reasoning_parts.append(content)
-            elif channel is None or channel == '':
-                # Default channel - treat as final
-                final_parts.append(content)
-
-        if final_parts:
-            result["final"] = ''.join(final_parts)
-        if reasoning_parts:
-            result["reasoning"] = ''.join(reasoning_parts)
-
-    except Exception as e:
-        logger.warning(f"Harmony parsing failed: {e}")
-
-    return result
+    return {
+        "final": ''.join(final_parts),
+        "reasoning": ''.join(reasoning_parts) if reasoning_parts else None
+    }
 
 
 async def _handle_batch_completions(body: dict, batch_requests: list):
@@ -298,12 +286,7 @@ async def _handle_batch_completions(body: dict, batch_requests: list):
             all_choices.append(choice)
 
         chunks_processed += 1
-
-        # Memory cleanup between chunks
-        try:
-            gc.collect()
-        except Exception:
-            pass
+        gc.collect()
 
     processing_time_ms = int((time.time() - start_time) * 1000)
     logger.info(f"Batch completed: {total_requests} prompts, {processing_time_ms}ms ({processing_time_ms/total_requests:.0f}ms/prompt)")
@@ -616,12 +599,7 @@ async def batch_completions(request: Request):
                 })
 
             chunks_processed += 1
-
-            # Memory cleanup between chunks (wrapped in try/except for TensorRT-LLM compatibility)
-            try:
-                gc.collect()
-            except Exception as cleanup_error:
-                logger.warning(f"Memory cleanup warning: {cleanup_error}")
+            gc.collect()
 
         processing_time_ms = int((time.time() - start_time) * 1000)
         logger.info(f"Batch completed: {total_requests} prompts in {chunks_processed} chunks, {processing_time_ms}ms total ({processing_time_ms/total_requests:.0f}ms/prompt)")
@@ -637,11 +615,7 @@ async def batch_completions(request: Request):
 
     except Exception as e:
         logger.error(f"Batch error: {e}")
-        # Memory cleanup on error
-        try:
-            gc.collect()
-        except:
-            pass
+        gc.collect()
         return JSONResponse(
             status_code=500,
             content={"error": {"message": str(e), "type": "internal_error"}}
