@@ -12,6 +12,13 @@ COPY tk_ai.svg tk_ai.png /app/icons/
 COPY requirements.txt .
 RUN if [ -s requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi
 
+# Pre-download tiktoken encoding files for openai-harmony (offline support)
+# Required because HF_HUB_OFFLINE=1 blocks runtime downloads
+RUN mkdir -p /app/tiktoken_encodings && \
+    curl -sL -o /app/tiktoken_encodings/o200k_base.tiktoken \
+    "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken"
+ENV TIKTOKEN_ENCODINGS_BASE=/app/tiktoken_encodings
+
 # Make entrypoint executable
 RUN chmod +x entrypoint.sh
 
