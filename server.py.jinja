@@ -17,6 +17,9 @@ from tensorrt_llm import LLM, SamplingParams
 from transformers import AutoTokenizer
 from thinkube_theme import create_thinkube_theme, THINKUBE_CSS
 
+# Official OpenAI harmony format parsing
+from openai_harmony import load_harmony_encoding, HarmonyEncodingName, Role
+
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -125,32 +128,48 @@ async def health_check():
 # OpenAI-Compatible API Endpoints (for LiteLLM integration)
 # ============================================================================
 
-import re
+# Initialize harmony encoding
+_harmony_enc = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+
 
 def parse_harmony_response(text: str) -> dict:
     """
     Parse harmony format response to extract different channels.
-    Harmony format uses specific markers like 'assistantfinal' (no spaces).
+    Uses the official openai-harmony package.
     Returns dict with 'final' (user-facing) and 'reasoning' (chain-of-thought) content.
-
-    Only matches exact harmony format markers to avoid truncating normal responses
-    that contain common words like 'final'.
     """
     result = {"final": text, "reasoning": None}
 
-    # Only match the specific harmony format marker: assistantfinal (one word, no spaces)
-    # This marker appears at the boundary between reasoning and final response
-    match = re.search(r'assistantfinal(.*)$', text, re.IGNORECASE | re.DOTALL)
-    if match:
-        final_content = match.group(1).strip()
-        if final_content:
-            result["final"] = final_content
-            # Extract reasoning (everything before the marker)
-            reasoning = text[:match.start()].strip()
-            # Remove 'analysis' prefix if present
-            reasoning = re.sub(r'^analysis\s*', '', reasoning, flags=re.IGNORECASE)
-            if reasoning:
-                result["reasoning"] = reasoning
+    try:
+        # Tokenize the text and parse
+        tokens = _harmony_enc.encode(text)
+        messages = _harmony_enc.parse_messages_from_completion_tokens(
+            tokens, role=Role.ASSISTANT, strict=False
+        )
+
+        # Extract content by channel
+        final_parts = []
+        reasoning_parts = []
+
+        for msg in messages:
+            channel = getattr(msg, 'channel', None)
+            content = getattr(msg, 'content', '')
+
+            if channel == 'final':
+                final_parts.append(content)
+            elif channel == 'analysis':
+                reasoning_parts.append(content)
+            elif channel is None or channel == '':
+                # Default channel - treat as final
+                final_parts.append(content)
+
+        if final_parts:
+            result["final"] = ''.join(final_parts)
+        if reasoning_parts:
+            result["reasoning"] = ''.join(reasoning_parts)
+
+    except Exception as e:
+        logger.warning(f"Harmony parsing failed: {e}")
 
     return result
 
