@@ -134,11 +134,108 @@ async def health_check():
 _harmony_enc = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
 
 
+# ============================================================================
+# Tool Calling Support (OpenAI-compatible tools -> Harmony format)
+# ============================================================================
+
+def convert_tools_to_harmony_namespace(tools: list) -> str:
+    """
+    Convert OpenAI tools format to harmony namespace TypeScript-style definition.
+
+    Input (OpenAI format):
+    [{"type": "function", "function": {
+        "name": "search_papers",
+        "description": "Search papers",
+        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}}
+    }}]
+
+    Output (Harmony format):
+    # Tools
+    ## functions
+    namespace functions {
+      // Search papers
+      type search_papers = (_: {
+        query: string,
+      }) => any;
+    }
+    """
+    if not tools:
+        return ""
+
+    lines = ["# Tools", "## functions", "namespace functions {"]
+
+    for tool in tools:
+        if tool.get("type") != "function":
+            continue
+        func = tool.get("function", {})
+        name = func.get("name", "unknown")
+        desc = func.get("description", "")
+        params = func.get("parameters", {})
+
+        # Add description as comment
+        if desc:
+            lines.append(f"  // {desc}")
+
+        # Convert parameters to TypeScript-style
+        props = params.get("properties", {})
+        required = set(params.get("required", []))
+
+        if not props:
+            lines.append(f"  type {name} = () => any;")
+        else:
+            param_lines = []
+            for pname, pdef in props.items():
+                ptype = pdef.get("type", "any")
+                ts_type = {"string": "string", "number": "number", "boolean": "boolean",
+                          "integer": "number", "array": "any[]", "object": "object"}.get(ptype, "any")
+                optional = "?" if pname not in required else ""
+                pdesc = pdef.get("description", "")
+                comment = f" // {pdesc}" if pdesc else ""
+                param_lines.append(f"    {pname}{optional}: {ts_type},{comment}")
+
+            lines.append(f"  type {name} = (_: {{")
+            lines.extend(param_lines)
+            lines.append("  }) => any;")
+        lines.append("")
+
+    lines.append("} // namespace functions")
+    return "\n".join(lines)
+
+
+def inject_tools_into_messages(messages: list, tools: list) -> list:
+    """
+    Inject harmony namespace definition into messages when tools are provided.
+    Tools go into the developer message per harmony spec.
+    """
+    if not tools:
+        return messages
+
+    namespace_def = convert_tools_to_harmony_namespace(tools)
+    messages = list(messages)  # Copy to avoid mutating original
+
+    # Find or create developer message
+    has_developer = any(m.get('role') == 'developer' for m in messages)
+    if has_developer:
+        for i, m in enumerate(messages):
+            if m.get('role') == 'developer':
+                messages[i] = dict(m)
+                messages[i]['content'] = namespace_def + "\n\n" + m.get('content', '')
+                break
+    else:
+        messages.insert(0, {'role': 'developer', 'content': namespace_def})
+
+    return messages
+
+
 def parse_harmony_response(text: str) -> dict:
     """
-    Parse harmony format response to extract different channels.
+    Parse harmony format response to extract channels and tool calls.
     Uses the official openai-harmony package.
-    Returns dict with 'final' (user-facing) and 'reasoning' (chain-of-thought) content.
+
+    Returns dict with:
+    - 'final': user-facing response
+    - 'reasoning': chain-of-thought (analysis channel)
+    - 'tool_calls': list of tool calls [{id, type, function: {name, arguments}}]
 
     Args:
         text: Raw text from TensorRT-LLM output (with skip_special_tokens=False)
@@ -150,21 +247,42 @@ def parse_harmony_response(text: str) -> dict:
 
     final_parts = []
     reasoning_parts = []
+    tool_calls = []
+    tool_call_counter = 0
 
     for msg in messages:
         channel = getattr(msg, 'channel', None)
+        recipient = getattr(msg, 'recipient', None)
         content = msg.content
+
+        # Extract text content
         if isinstance(content, list):
-            content = ''.join(str(c) for c in content)
+            content = ''.join(
+                c.text if hasattr(c, 'text') else str(c)
+                for c in content
+            )
 
         if channel == 'final':
             final_parts.append(content)
         elif channel == 'analysis':
             reasoning_parts.append(content)
+        elif channel == 'commentary' and recipient and recipient.startswith('functions.'):
+            # This is a tool call: commentary to=functions.xxx
+            func_name = recipient.replace('functions.', '')
+            tool_call_counter += 1
+            tool_calls.append({
+                "id": f"call_{tool_call_counter:04d}_{int(time.time() * 1000) % 10000}",
+                "type": "function",
+                "function": {
+                    "name": func_name,
+                    "arguments": content
+                }
+            })
 
     return {
         "final": ''.join(final_parts),
-        "reasoning": ''.join(reasoning_parts) if reasoning_parts else None
+        "reasoning": ''.join(reasoning_parts) if reasoning_parts else None,
+        "tool_calls": tool_calls if tool_calls else None
     }
 
 
@@ -320,6 +438,10 @@ async def openai_chat_completions(request: Request):
     - Single: {"messages": [...], "max_tokens": 512, ...}
     - Batch:  {"batch": [{"messages": [...]}, {"messages": [...]}], "max_tokens": 512, ...}
 
+    Also supports OpenAI-compatible tool calling:
+    - tools: [{"type": "function", "function": {...}}]
+    - Returns tool_calls in response when model wants to call a function
+
     Batch mode uses true GPU batching for maximum throughput.
     This allows batch requests to flow through LiteLLM unchanged.
     """
@@ -333,11 +455,17 @@ async def openai_chat_completions(request: Request):
 
         # Single request mode (standard OpenAI format)
         messages = body.get('messages', [])
+        tools = body.get('tools', None)  # OpenAI-compatible tools parameter
         temperature = body.get('temperature', 0.7)
         max_tokens = body.get('max_tokens', 512)
         stream = body.get('stream', False)
         top_p = body.get('top_p', 0.9)
         include_reasoning = body.get('include_reasoning', False)  # Optional: include chain-of-thought
+
+        # If tools provided, inject harmony namespace into messages
+        if tools:
+            messages = inject_tools_into_messages(messages, tools)
+            logger.info(f"=== Tools Injected === {len(tools)} tools converted to harmony namespace")
 
         # Apply chat template (uses harmony format for gpt-oss, chatml for others, etc.)
         prompt = tokenizer.apply_chat_template(
@@ -349,6 +477,8 @@ async def openai_chat_completions(request: Request):
         logger.info(f"=== API Request ===")
         logger.info(f"max_tokens: {max_tokens}, temperature: {temperature}, top_p: {top_p}")
         logger.info(f"Prompt length (chars): {len(prompt)}")
+        if tools:
+            logger.info(f"Tools: {[t.get('function', {}).get('name') for t in tools if t.get('type') == 'function']}")
 
         # Configure sampling parameters
         # skip_special_tokens=False preserves harmony format tokens for parsing
@@ -369,13 +499,17 @@ async def openai_chat_completions(request: Request):
         logger.info(f"Finish reason: {finish_reason}")
         logger.info(f"RAW_RESPONSE_START>>>{raw_text}<<<RAW_RESPONSE_END")
 
-        # Parse harmony format to extract final response
+        # Parse harmony format to extract final response and tool calls
         parsed = parse_harmony_response(raw_text)
         response_text = parsed["final"]
+        tool_calls = parsed.get("tool_calls")
 
         logger.info(f"=== Parsed Response ===")
         logger.info(f"Harmony parsing applied: {parsed['reasoning'] is not None}")
         logger.info(f"Final length (chars): {len(response_text)}")
+        logger.info(f"Tool calls detected: {len(tool_calls) if tool_calls else 0}")
+        if tool_calls:
+            logger.info(f"Tool calls: {[tc['function']['name'] for tc in tool_calls]}")
         logger.info(f"PARSED_RESPONSE_START>>>{response_text}<<<PARSED_RESPONSE_END")
 
         # Optionally include reasoning in a separate field
@@ -388,6 +522,15 @@ async def openai_chat_completions(request: Request):
         if stream:
             # Streaming response (simplified - sends full response in one chunk)
             async def generate_stream():
+                # Build message content
+                message_content = {"role": "assistant"}
+                if tool_calls:
+                    message_content["tool_calls"] = tool_calls
+                    if response_text:
+                        message_content["content"] = response_text
+                else:
+                    message_content["content"] = response_text
+
                 chunk = {
                     "id": completion_id,
                     "object": "chat.completion.chunk",
@@ -395,7 +538,7 @@ async def openai_chat_completions(request: Request):
                     "model": MODEL_ID,
                     "choices": [{
                         "index": 0,
-                        "delta": {"role": "assistant", "content": response_text},
+                        "delta": message_content,
                         "finish_reason": None
                     }]
                 }
@@ -410,7 +553,7 @@ async def openai_chat_completions(request: Request):
                     "choices": [{
                         "index": 0,
                         "delta": {},
-                        "finish_reason": "stop"
+                        "finish_reason": "tool_calls" if tool_calls else "stop"
                     }]
                 }
                 yield f"data: {json.dumps(final_chunk)}\n\n"
@@ -423,6 +566,17 @@ async def openai_chat_completions(request: Request):
             )
 
         # Non-streaming response
+        # Build message based on whether tool calls were made
+        message = {"role": "assistant"}
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+            # Content can be null or contain text when there are tool calls
+            message["content"] = response_text if response_text else None
+            api_finish_reason = "tool_calls"
+        else:
+            message["content"] = response_text
+            api_finish_reason = "stop"
+
         response_data = {
             "id": completion_id,
             "object": "chat.completion",
@@ -430,11 +584,8 @@ async def openai_chat_completions(request: Request):
             "model": MODEL_ID,
             "choices": [{
                 "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": response_text
-                },
-                "finish_reason": "stop"
+                "message": message,
+                "finish_reason": api_finish_reason
             }],
             "usage": {
                 "prompt_tokens": 0,  # TensorRT-LLM doesn't expose token counts easily
@@ -450,6 +601,7 @@ async def openai_chat_completions(request: Request):
         return JSONResponse(response_data)
 
     except Exception as e:
+        logger.error(f"Error in chat completions: {e}", exc_info=True)
         return JSONResponse(
             status_code=500,
             content={"error": {"message": str(e), "type": "internal_error"}}
