@@ -294,6 +294,8 @@ def parse_harmony_response(text: str) -> dict:
         elif channel == 'commentary' and recipient and recipient.startswith('functions.'):
             # This is a tool call: commentary to=functions.xxx
             func_name = recipient.replace('functions.', '')
+            # Detect malformed function names (model quirk - candidate for fine-tuning)
+            is_malformed = '<|' in func_name or func_name != func_name.strip()
             tool_call_counter += 1
             tool_calls.append({
                 "id": f"call_{tool_call_counter:04d}_{int(time.time() * 1000) % 10000}",
@@ -301,13 +303,23 @@ def parse_harmony_response(text: str) -> dict:
                 "function": {
                     "name": func_name,
                     "arguments": content
-                }
+                },
+                "_raw_recipient": recipient,
+                "_is_malformed": is_malformed
             })
+
+    # Build debug info (only one tool call per response due to <|call|> stop token)
+    tool_call = tool_calls[0] if tool_calls else None
+    debug_info = {"raw_harmony_text": text}
+    if tool_call:
+        debug_info["raw_recipient"] = tool_call.pop("_raw_recipient")
+        debug_info["is_malformed"] = tool_call.pop("_is_malformed")
 
     return {
         "final": ''.join(final_parts),
         "reasoning": ''.join(reasoning_parts) if reasoning_parts else None,
-        "tool_calls": tool_calls if tool_calls else None
+        "tool_calls": tool_calls if tool_calls else None,
+        "_debug": debug_info
     }
 {% endraw %}
 
@@ -488,6 +500,7 @@ async def openai_chat_completions(request: Request):
         stream = body.get('stream', False)
         top_p = body.get('top_p', 0.9)
         include_reasoning = body.get('include_reasoning', False)  # Optional: include chain-of-thought
+        include_debug = body.get('include_debug', False)  # Optional: include raw harmony text for diagnostics
 
         # If tools provided, inject harmony namespace into messages
         if tools:
@@ -626,6 +639,10 @@ async def openai_chat_completions(request: Request):
         # Optionally include reasoning (chain-of-thought) in response
         if reasoning_text:
             response_data["reasoning"] = reasoning_text
+
+        # Optionally include debug info for fine-tuning data collection
+        if include_debug:
+            response_data["_debug"] = parsed.get("_debug", {})
 
         return JSONResponse(response_data)
 
