@@ -20,6 +20,14 @@ from thinkube_theme import create_thinkube_theme, THINKUBE_CSS
 # Official OpenAI harmony format parsing
 from openai_harmony import load_harmony_encoding, HarmonyEncodingName, Role
 
+# Harmony format stop tokens (from openai-harmony spec)
+# These tokens indicate model should stop generating:
+# - <|return|> (200002): Model is done with final response
+# - <|call|> (200012): Model wants to call a tool
+# The model's generation_config.json should include these as eos_token_id,
+# but we explicitly pass them to ensure TensorRT-LLM stops generation.
+HARMONY_STOP_TOKEN_IDS = [200002, 200012]
+
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -72,11 +80,13 @@ def generate_response(message: str, history: list, temperature: float = 0.7, max
 
     # Configure sampling parameters
     # skip_special_tokens=False preserves harmony format tokens for parsing
+    # stop_token_ids ensures model stops at <|return|> or <|call|> tokens
     sampling_params = SamplingParams(
         temperature=temperature,
         max_tokens=max_tokens,
         top_p=0.9,
-        skip_special_tokens=False
+        skip_special_tokens=False,
+        stop_token_ids=HARMONY_STOP_TOKEN_IDS
     )
 
     # Generate with TensorRT-LLM Python API
@@ -369,7 +379,8 @@ async def _handle_batch_completions(body: dict, batch_requests: list):
         temperature=first_req.get('temperature', default_temperature),
         max_tokens=first_req.get('max_tokens', default_max_tokens),
         top_p=first_req.get('top_p', default_top_p),
-        skip_special_tokens=False
+        skip_special_tokens=False,
+        stop_token_ids=HARMONY_STOP_TOKEN_IDS
     )
 
     # Process in chunks to prevent OOM (same as /v1/batch/completions)
@@ -498,11 +509,13 @@ async def openai_chat_completions(request: Request):
 
         # Configure sampling parameters
         # skip_special_tokens=False preserves harmony format tokens for parsing
+        # stop_token_ids ensures model stops at <|return|> or <|call|> tokens
         sampling_params = SamplingParams(
             temperature=temperature,
             max_tokens=max_tokens,
             top_p=top_p,
-            skip_special_tokens=False
+            skip_special_tokens=False,
+            stop_token_ids=HARMONY_STOP_TOKEN_IDS
         )
 
         # Generate with TensorRT-LLM (async to handle concurrent requests)
@@ -716,7 +729,8 @@ async def batch_completions(request: Request):
                 temperature=temperature,
                 max_tokens=max_tokens,
                 top_p=top_p,
-                skip_special_tokens=False
+                skip_special_tokens=False,
+                stop_token_ids=HARMONY_STOP_TOKEN_IDS
             ))
 
         # Process in chunks to prevent OOM
