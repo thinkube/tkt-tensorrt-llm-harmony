@@ -147,99 +147,9 @@ _harmony_enc = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
 
 
 # ============================================================================
-# Tool Calling Support (OpenAI-compatible tools -> Harmony format)
+# Harmony Response Parsing
 # ============================================================================
 {% raw %}
-def convert_tools_to_harmony_namespace(tools: list) -> str:
-    """
-    Convert OpenAI tools format to harmony namespace TypeScript-style definition.
-
-    Input (OpenAI format):
-    [{"type": "function", "function": {
-        "name": "search_papers",
-        "description": "Search papers",
-        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}}
-    }}]
-
-    Output (Harmony format):
-    # Tools
-    ## functions
-    namespace functions {
-      // Search papers
-      type search_papers = (_: {
-        query: string,
-      }) => any;
-    }
-    """
-    if not tools:
-        return ""
-
-    lines = ["# Tools", "## functions", "namespace functions {"]
-
-    for tool in tools:
-        if tool.get("type") != "function":
-            continue
-        func = tool.get("function", {})
-        name = func.get("name", "unknown")
-        desc = func.get("description", "")
-        params = func.get("parameters", {})
-
-        # Add description as comment
-        if desc:
-            lines.append(f"  // {desc}")
-
-        # Convert parameters to TypeScript-style
-        props = params.get("properties", {})
-        required = set(params.get("required", []))
-
-        if not props:
-            lines.append(f"  type {name} = () => any;")
-        else:
-            param_lines = []
-            for pname, pdef in props.items():
-                ptype = pdef.get("type", "any")
-                ts_type = {"string": "string", "number": "number", "boolean": "boolean",
-                          "integer": "number", "array": "any[]", "object": "object"}.get(ptype, "any")
-                optional = "?" if pname not in required else ""
-                pdesc = pdef.get("description", "")
-                comment = f" // {pdesc}" if pdesc else ""
-                param_lines.append(f"    {pname}{optional}: {ts_type},{comment}")
-
-            # Use string concatenation to avoid Jinja template confusion with braces
-            lines.append("  type " + name + " = (_: {")
-            lines.extend(param_lines)
-            lines.append("  }) => any;")
-        lines.append("")
-
-    lines.append("} // namespace functions")
-    return "\n".join(lines)
-
-
-def inject_tools_into_messages(messages: list, tools: list) -> list:
-    """
-    Inject harmony namespace definition into messages when tools are provided.
-    Tools go into the developer message per harmony spec.
-    """
-    if not tools:
-        return messages
-
-    namespace_def = convert_tools_to_harmony_namespace(tools)
-    messages = list(messages)  # Copy to avoid mutating original
-
-    # Find or create developer message
-    has_developer = any(m.get('role') == 'developer' for m in messages)
-    if has_developer:
-        for i, m in enumerate(messages):
-            if m.get('role') == 'developer':
-                messages[i] = dict(m)
-                messages[i]['content'] = namespace_def + "\n\n" + m.get('content', '')
-                break
-    else:
-        messages.insert(0, {'role': 'developer', 'content': namespace_def})
-
-    return messages
-
-
 def parse_harmony_response(text: str) -> dict:
     """
     Parse harmony format response to extract channels and tool calls.
@@ -504,17 +414,15 @@ async def openai_chat_completions(request: Request):
         include_reasoning = body.get('include_reasoning', False)  # Optional: include chain-of-thought
         include_debug = body.get('include_debug', False)  # Optional: include raw harmony text for diagnostics
 
-        # If tools provided, inject harmony namespace into messages
-        if tools:
-            messages = inject_tools_into_messages(messages, tools)
-            logger.info(f"=== Tools Injected === {len(tools)} tools converted to harmony namespace")
-
-        # Apply chat template (uses harmony format for gpt-oss, chatml for others, etc.)
+        # Apply chat template with tools - template handles system instruction + namespace
         prompt = tokenizer.apply_chat_template(
             messages,
+            tools=tools,
             tokenize=False,
             add_generation_prompt=True
         )
+        if tools:
+            logger.info(f"=== Tools === {len(tools)} tools passed to chat template")
 
         logger.info(f"=== API Request ===")
         logger.info(f"max_tokens: {max_tokens}, temperature: {temperature}, top_p: {top_p}")
