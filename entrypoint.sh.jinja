@@ -4,6 +4,11 @@ set -e
 echo "=== TensorRT-LLM Inference Server Startup ==="
 echo "Model: {{ model_id }}"
 
+# Fix LD_LIBRARY_PATH to include NVIDIA cuda_nvrtc libraries
+# Required for TensorRT-LLM bindings to find libnvrtc.so.12
+export LD_LIBRARY_PATH="/usr/local/lib/python3.12/dist-packages/nvidia/cuda_nvrtc/lib:${LD_LIBRARY_PATH}"
+echo "LD_LIBRARY_PATH updated to include cuda_nvrtc"
+
 # Configure HuggingFace to use local models only (no network access)
 # Models are stored in MLflow artifacts on JuiceFS at /mlflow-models/artifacts/{run_id}/artifacts/model
 export HF_HUB_OFFLINE=1
