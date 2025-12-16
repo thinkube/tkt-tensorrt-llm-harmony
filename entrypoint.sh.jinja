@@ -106,8 +106,52 @@ echo "Using model path: $MODEL_PATH"
 # Export MODEL_PATH for Python server to use
 export MODEL_PATH
 
-# Start Gradio UI with TensorRT-LLM Python API
-# The LLM() class handles model loading, vocab files, and tokenization automatically
-echo "Starting TensorRT-LLM inference server with Python API on port 7860..."
-echo "Model will be loaded directly using tensorrt_llm.LLM() - this may take several minutes..."
+# Start trtllm-serve backend for optimized MXFP4 inference
+# This properly utilizes the MXFP4 quantized weights in gpt-oss models
+echo "Starting trtllm-serve backend on port 8355..."
+echo "Model will be served with PyTorch backend for MXFP4 support..."
+
+# Create extra options file for guided decoding
+cat > /tmp/extra_llm_api_options.yaml << 'EOF'
+guided_decoding_backend: xgrammar
+EOF
+
+# Start trtllm-serve in background
+# --backend pytorch: Uses PyTorch runtime which properly handles MXFP4
+# --host 127.0.0.1: Only accessible within container (server.py proxies requests)
+# --port 8355: Internal API port
+trtllm-serve "$MODEL_PATH" \
+    --backend pytorch \
+    --extra_llm_api_options /tmp/extra_llm_api_options.yaml \
+    --host 127.0.0.1 \
+    --port 8355 \
+    --log_level info &
+
+TRTLLM_PID=$!
+echo "trtllm-serve started with PID $TRTLLM_PID"
+
+# Wait for trtllm-serve to be ready
+echo "Waiting for trtllm-serve to be ready..."
+MAX_RETRIES=120  # 10 minutes max (model loading can take time)
+RETRY_COUNT=0
+while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+    if curl -s http://127.0.0.1:8355/health > /dev/null 2>&1; then
+        echo "✓ trtllm-serve is ready!"
+        break
+    fi
+    RETRY_COUNT=$((RETRY_COUNT + 1))
+    if [ $((RETRY_COUNT % 10)) -eq 0 ]; then
+        echo "Still waiting for trtllm-serve... ($RETRY_COUNT/$MAX_RETRIES)"
+    fi
+    sleep 5
+done
+
+if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
+    echo "ERROR: trtllm-serve failed to start within timeout"
+    kill $TRTLLM_PID 2>/dev/null || true
+    exit 1
+fi
+
+# Start Gradio frontend (proxies to trtllm-serve and handles harmony parsing)
+echo "Starting Gradio frontend on port 7860..."
 exec python3 server.py

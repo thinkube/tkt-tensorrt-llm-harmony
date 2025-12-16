@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
 TensorRT-LLM Inference Server with Gradio UI
-For text generation models with NVFP4 support on Blackwell (DGX Spark GB10)
-Uses TensorRT-LLM Python API for direct model loading
+For text generation models with MXFP4 support on Blackwell (DGX Spark GB10)
+Uses trtllm-serve backend for optimized MXFP4 inference
 """
 
 import os
 import json
 import time
 import logging
+import httpx
 import gradio as gr
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 import uvicorn
-from tensorrt_llm import LLM, SamplingParams
 from transformers import AutoTokenizer
 from thinkube_theme import create_thinkube_theme, THINKUBE_CSS
 
@@ -24,9 +24,7 @@ from openai_harmony import load_harmony_encoding, HarmonyEncodingName, Role
 # These tokens indicate model should stop generating:
 # - <|return|> (200002): Model is done with final response
 # - <|call|> (200012): Model wants to call a tool
-# The model's generation_config.json should include these as eos_token_id,
-# but we explicitly pass them to ensure TensorRT-LLM stops generation.
-HARMONY_STOP_TOKEN_IDS = [200002, 200012]
+HARMONY_STOP_TOKENS = ["<|return|>", "<|call|>"]
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -36,33 +34,41 @@ logger = logging.getLogger(__name__)
 MODEL_ID = "{{ model_id }}"
 MODEL_PATH = os.environ.get('MODEL_PATH')
 
+# trtllm-serve backend URL (started by entrypoint.sh)
+TRTLLM_BACKEND_URL = "http://127.0.0.1:8355"
+
 # Initialize FastAPI app
 app = FastAPI(title="{{ project_name }} TensorRT-LLM Server")
 
-# Global LLM and tokenizer instances (initialized in main block to support MPI)
-llm = None
+# Global tokenizer (for chat template formatting)
 tokenizer = None
 
-def initialize_model():
-    """Initialize TensorRT-LLM model and tokenizer (must be called from main block for MPI support)"""
-    global llm, tokenizer
-    print(f"Loading model from: {MODEL_PATH}")
+# HTTP client for backend calls (with connection pooling)
+http_client = None
+
+def initialize():
+    """Initialize tokenizer and HTTP client"""
+    global tokenizer, http_client
     print(f"Model ID: {MODEL_ID}")
+    print(f"Model path: {MODEL_PATH}")
+    print(f"Backend URL: {TRTLLM_BACKEND_URL}")
 
     # Load tokenizer for chat template formatting
     print("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
 
-    # Load TensorRT-LLM model
-    # max_num_tokens sets KV-cache size (total context: input + output)
-    # Default is 8192 which is too small for multi-turn agent conversations
-    print("Loading TensorRT-LLM model...")
-    llm = LLM(model=MODEL_PATH, max_num_tokens=131072)
+    # Initialize HTTP client with connection pooling for backend calls
+    http_client = httpx.AsyncClient(
+        base_url=TRTLLM_BACKEND_URL,
+        timeout=httpx.Timeout(300.0, connect=10.0),  # 5 min for generation, 10s for connect
+    )
 
-    print(f"✓ TensorRT-LLM model and tokenizer loaded successfully")
+    print(f"✓ Tokenizer loaded, connected to trtllm-serve backend")
 
 def generate_response(message: str, history: list, temperature: float = 0.7, max_tokens: int = 512):
-    """Generate response using TensorRT-LLM Python API with harmony chat template"""
+    """Generate response via trtllm-serve backend with harmony chat template"""
+    import httpx
+
     # Convert Gradio history to OpenAI messages format
     messages = []
     for human, assistant in history:
@@ -72,30 +78,27 @@ def generate_response(message: str, history: list, temperature: float = 0.7, max
     # Add current message
     messages.append({"role": "user", "content": message})
 
-    # Apply chat template to format messages with harmony format
-    # This adds the special tokens like <|start|>, <|message|>, <|channel|>, etc.
-    prompt = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True
-    )
+    # Call trtllm-serve backend (OpenAI-compatible API)
+    # The backend handles chat template application internally
+    with httpx.Client(base_url=TRTLLM_BACKEND_URL, timeout=300.0) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": MODEL_ID,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "top_p": 0.9,
+                "stop": HARMONY_STOP_TOKENS,
+            }
+        )
+        response.raise_for_status()
+        result = response.json()
 
-    # Configure sampling parameters
-    # skip_special_tokens=False preserves harmony format tokens for parsing
-    # stop_token_ids ensures model stops at <|return|> or <|call|> tokens
-    sampling_params = SamplingParams(
-        temperature=temperature,
-        max_tokens=max_tokens,
-        top_p=0.9,
-        skip_special_tokens=False,
-        stop_token_ids=HARMONY_STOP_TOKEN_IDS
-    )
+    # Extract raw response text
+    raw_text = result["choices"][0]["message"]["content"]
 
-    # Generate with TensorRT-LLM Python API
-    outputs = llm.generate([prompt], sampling_params)
-
-    # Extract and parse response (remove harmony format reasoning)
-    raw_text = outputs[0].outputs[0].text
+    # Parse harmony format to extract final response
     parsed = parse_harmony_response(raw_text)
     yield parsed["final"]
 
@@ -124,12 +127,15 @@ demo = gr.ChatInterface(
 @app.get("/health")
 async def health_check():
     try:
-        # Check if model is loaded
+        # Check if trtllm-serve backend is healthy
+        response = await http_client.get("/health")
+        backend_health = response.json() if response.status_code == 200 else {"status": "unknown"}
         return {
             "status": "healthy",
             "model": MODEL_ID,
             "model_path": MODEL_PATH,
-            "engine": "TensorRT-LLM (Python API)"
+            "engine": "trtllm-serve (MXFP4)",
+            "backend": backend_health
         }
     except Exception as e:
         return {
@@ -238,10 +244,9 @@ def parse_harmony_response(text: str) -> dict:
 
 async def _handle_batch_completions(body: dict, batch_requests: list):
     """
-    Handle batch completions with true GPU batching.
+    Handle batch completions via trtllm-serve backend.
 
-    This function processes multiple requests in a single GPU batch operation,
-    providing significant speedup over sequential processing.
+    Processes requests sequentially through the backend (backend handles batching internally).
 
     Request format (via /v1/chat/completions):
     {
@@ -265,9 +270,7 @@ async def _handle_batch_completions(body: dict, batch_requests: list):
         "batch_info": {"count": N, "processing_time_ms": X}
     }
     """
-    import gc
     import asyncio
-    from concurrent.futures import ThreadPoolExecutor
 
     start_time = time.time()
 
@@ -286,76 +289,51 @@ async def _handle_batch_completions(body: dict, batch_requests: list):
             content={"error": {"message": "Empty batch", "type": "invalid_request"}}
         )
 
-    # Prepare all prompts
-    all_prompts = []
-    for req in batch_requests:
+    # Process requests concurrently via backend
+    async def process_single_request(idx: int, req: dict):
         messages = req.get('messages', [])
-        prompt = tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True
-        )
-        all_prompts.append(prompt)
+        temperature = req.get('temperature', default_temperature)
+        max_tokens = req.get('max_tokens', default_max_tokens)
+        top_p = req.get('top_p', default_top_p)
 
-    # Use first request's params (or defaults) for batch
-    first_req = batch_requests[0]
-    sampling_params = SamplingParams(
-        temperature=first_req.get('temperature', default_temperature),
-        max_tokens=first_req.get('max_tokens', default_max_tokens),
-        top_p=first_req.get('top_p', default_top_p),
-        skip_special_tokens=False,
-        stop_token_ids=HARMONY_STOP_TOKEN_IDS
-    )
-
-    # Process in chunks to prevent OOM (same as /v1/batch/completions)
-    all_choices = []
-    chunks_processed = 0
-
-    # Thread pool for running sync generate without blocking event loop
-    executor = ThreadPoolExecutor(max_workers=1)
-
-    def sync_generate_batch(prompts, params):
-        """Run sync generate in thread to preserve true GPU batching"""
-        return llm.generate(prompts, params)
-
-    for i in range(0, total_requests, MAX_BATCH_SIZE):
-        chunk_prompts = all_prompts[i:i + MAX_BATCH_SIZE]
-        chunk_size = len(chunk_prompts)
-
-        logger.info(f"Processing batch chunk {chunks_processed + 1}: {chunk_size} prompts")
-
-        # Run true GPU batch in thread pool
-        loop = asyncio.get_event_loop()
-        outputs = await loop.run_in_executor(
-            executor,
-            sync_generate_batch,
-            chunk_prompts,
-            sampling_params
-        )
-
-        # Process responses
-        for j, output in enumerate(outputs):
-            raw_text = output.outputs[0].text
-            finish_reason = getattr(output.outputs[0], 'finish_reason', 'stop')
-            parsed = parse_harmony_response(raw_text)
-
-            choice = {
-                "index": i + j,
-                "message": {
-                    "role": "assistant",
-                    "content": parsed["final"]
-                },
-                "finish_reason": str(finish_reason) if finish_reason else "stop"
+        response = await http_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": MODEL_ID,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "top_p": top_p,
+                "stop": HARMONY_STOP_TOKENS,
             }
+        )
+        response.raise_for_status()
+        result = response.json()
 
-            # Optionally include reasoning
-            if include_reasoning and parsed.get("reasoning"):
-                choice["reasoning"] = parsed["reasoning"]
+        raw_text = result["choices"][0]["message"]["content"]
+        finish_reason = result["choices"][0].get("finish_reason", "stop")
+        parsed = parse_harmony_response(raw_text)
 
-            all_choices.append(choice)
+        choice = {
+            "index": idx,
+            "message": {
+                "role": "assistant",
+                "content": parsed["final"]
+            },
+            "finish_reason": finish_reason
+        }
 
-        chunks_processed += 1
-        gc.collect()
+        if include_reasoning and parsed.get("reasoning"):
+            choice["reasoning"] = parsed["reasoning"]
+
+        return choice
+
+    # Run all requests concurrently (backend handles batching)
+    tasks = [process_single_request(i, req) for i, req in enumerate(batch_requests)]
+    all_choices = await asyncio.gather(*tasks)
+
+    # Sort by index to maintain order
+    all_choices = sorted(all_choices, key=lambda x: x["index"])
 
     processing_time_ms = int((time.time() - start_time) * 1000)
     logger.info(f"Batch completed: {total_requests} prompts, {processing_time_ms}ms ({processing_time_ms/total_requests:.0f}ms/prompt)")
@@ -375,15 +353,14 @@ async def _handle_batch_completions(body: dict, batch_requests: list):
         "batch_info": {
             "count": total_requests,
             "processing_time_ms": processing_time_ms,
-            "avg_time_per_prompt_ms": processing_time_ms / total_requests,
-            "chunks_processed": chunks_processed
+            "avg_time_per_prompt_ms": processing_time_ms / total_requests
         }
     })
 
 
 @app.post("/v1/chat/completions")
 async def openai_chat_completions(request: Request):
-    """OpenAI-compatible chat completions endpoint using TensorRT-LLM
+    """OpenAI-compatible chat completions endpoint via trtllm-serve
 
     Supports both single and batch requests:
     - Single: {"messages": [...], "max_tokens": 512, ...}
@@ -393,8 +370,7 @@ async def openai_chat_completions(request: Request):
     - tools: [{"type": "function", "function": {...}}]
     - Returns tool_calls in response when model wants to call a function
 
-    Batch mode uses true GPU batching for maximum throughput.
-    This allows batch requests to flow through LiteLLM unchanged.
+    Proxies to trtllm-serve backend and applies harmony format parsing.
     """
     try:
         body = await request.json()
@@ -414,37 +390,32 @@ async def openai_chat_completions(request: Request):
         include_reasoning = body.get('include_reasoning', False)  # Optional: include chain-of-thought
         include_debug = body.get('include_debug', False)  # Optional: include raw harmony text for diagnostics
 
-        # Apply chat template with tools - template handles system instruction + namespace
-        prompt = tokenizer.apply_chat_template(
-            messages,
-            tools=tools,
-            tokenize=False,
-            add_generation_prompt=True
-        )
-        if tools:
-            logger.info(f"=== Tools === {len(tools)} tools passed to chat template")
-
         logger.info(f"=== API Request ===")
         logger.info(f"max_tokens: {max_tokens}, temperature: {temperature}, top_p: {top_p}")
-        logger.info(f"Prompt length (chars): {len(prompt)}")
+        logger.info(f"Messages: {len(messages)}")
         if tools:
             logger.info(f"Tools: {[t.get('function', {}).get('name') for t in tools if t.get('type') == 'function']}")
 
-        # Configure sampling parameters
-        # skip_special_tokens=False preserves harmony format tokens for parsing
-        # stop_token_ids ensures model stops at <|return|> or <|call|> tokens
-        sampling_params = SamplingParams(
-            temperature=temperature,
-            max_tokens=max_tokens,
-            top_p=top_p,
-            skip_special_tokens=False,
-            stop_token_ids=HARMONY_STOP_TOKEN_IDS
-        )
+        # Build request payload for backend
+        # trtllm-serve handles chat template application
+        backend_payload = {
+            "model": MODEL_ID,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "top_p": top_p,
+            "stop": HARMONY_STOP_TOKENS,
+        }
+        if tools:
+            backend_payload["tools"] = tools
 
-        # Generate with TensorRT-LLM (async to handle concurrent requests)
-        output = await llm.generate_async(prompt, sampling_params)
-        raw_text = output.outputs[0].text
-        finish_reason = getattr(output.outputs[0], 'finish_reason', 'unknown')
+        # Call trtllm-serve backend
+        response = await http_client.post("/v1/chat/completions", json=backend_payload)
+        response.raise_for_status()
+        result = response.json()
+
+        raw_text = result["choices"][0]["message"]["content"] or ""
+        finish_reason = result["choices"][0].get("finish_reason", "stop")
 
         logger.info(f"=== Raw Response ===")
         logger.info(f"Length (chars): {len(raw_text)}")
@@ -539,11 +510,11 @@ async def openai_chat_completions(request: Request):
                 "message": message,
                 "finish_reason": api_finish_reason
             }],
-            "usage": {
-                "prompt_tokens": 0,  # TensorRT-LLM doesn't expose token counts easily
+            "usage": result.get("usage", {
+                "prompt_tokens": 0,
                 "completion_tokens": 0,
                 "total_tokens": 0
-            }
+            })
         }
 
         # Optionally include reasoning (chain-of-thought) in response
@@ -585,19 +556,13 @@ async def openai_models():
 # Batch Completions Endpoint (for parallel data generation)
 # ============================================================================
 
-# DGX Spark unified memory (128GB): 20B NVFP4 model uses ~15GB, leaving ~100GB for KV cache
-# With 80Gi pod memory limit, batch size 8 is safe for 800 max_tokens
-MAX_BATCH_SIZE = 8
-
 @app.post("/v1/batch/completions")
 async def batch_completions(request: Request):
     """
-    Batch completions endpoint for parallel inference.
+    Batch completions endpoint for parallel inference via trtllm-serve.
 
-    Accepts multiple prompts and processes them in GPU batches,
-    providing significant speedup over sequential requests.
-
-    Large batches are automatically chunked to prevent OOM on unified memory.
+    Accepts multiple prompts and processes them concurrently.
+    Backend handles GPU batching internally.
 
     Request format:
     {
@@ -616,11 +581,10 @@ async def batch_completions(request: Request):
             ...
         ],
         "batch_size": N,
-        "processing_time_ms": X,
-        "chunks_processed": Y
+        "processing_time_ms": X
     }
     """
-    import gc
+    import asyncio
 
     try:
         start_time = time.time()
@@ -634,97 +598,60 @@ async def batch_completions(request: Request):
             )
 
         total_requests = len(requests_list)
-        logger.info(f"=== Batch Request === total={total_requests}, max_chunk={MAX_BATCH_SIZE}")
+        logger.info(f"=== Batch Request === total={total_requests}")
 
-        # Prepare all prompts and sampling params
-        all_prompts = []
-        all_params = []
-
-        for req in requests_list:
+        # Process requests concurrently via backend
+        async def process_single_request(idx: int, req: dict):
             messages = req.get('messages', [])
             temperature = req.get('temperature', 0.7)
             max_tokens = req.get('max_tokens', 512)
             top_p = req.get('top_p', 0.9)
 
-            prompt = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True
+            response = await http_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": MODEL_ID,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "top_p": top_p,
+                    "stop": HARMONY_STOP_TOKENS,
+                }
             )
-            all_prompts.append(prompt)
-            all_params.append(SamplingParams(
-                temperature=temperature,
-                max_tokens=max_tokens,
-                top_p=top_p,
-                skip_special_tokens=False,
-                stop_token_ids=HARMONY_STOP_TOKEN_IDS
-            ))
+            response.raise_for_status()
+            result = response.json()
 
-        # Process in chunks to prevent OOM
-        all_responses = []
-        chunks_processed = 0
+            raw_text = result["choices"][0]["message"]["content"] or ""
+            finish_reason = result["choices"][0].get("finish_reason", "stop")
+            parsed = parse_harmony_response(raw_text)
 
-        import asyncio
-        from concurrent.futures import ThreadPoolExecutor
+            return {
+                "index": idx,
+                "content": parsed["final"],
+                "finish_reason": finish_reason,
+                "reasoning": parsed.get("reasoning")
+            }
 
-        # Use thread pool to run sync generate() without blocking event loop
-        # This preserves true GPU batching while being async-compatible
-        executor = ThreadPoolExecutor(max_workers=1)
+        # Run all requests concurrently
+        tasks = [process_single_request(i, req) for i, req in enumerate(requests_list)]
+        results = await asyncio.gather(*tasks)
 
-        def sync_generate_batch(prompts, params):
-            """Run sync generate in thread to avoid blocking uvicorn event loop"""
-            return llm.generate(prompts, params)
-
-        for i in range(0, total_requests, MAX_BATCH_SIZE):
-            chunk_prompts = all_prompts[i:i + MAX_BATCH_SIZE]
-            chunk_params = all_params[i:i + MAX_BATCH_SIZE]
-            chunk_size = len(chunk_prompts)
-
-            logger.info(f"Processing chunk {chunks_processed + 1}: {chunk_size} prompts (indices {i}-{i + chunk_size - 1})")
-
-            # Use first request's params for this chunk (TensorRT-LLM batches internally)
-            batch_sampling_params = chunk_params[0]
-
-            # Run sync generate in thread pool to preserve true GPU batching
-            # while not blocking the uvicorn event loop
-            loop = asyncio.get_event_loop()
-            outputs = await loop.run_in_executor(
-                executor,
-                sync_generate_batch,
-                chunk_prompts,
-                batch_sampling_params
-            )
-
-            # Process responses
-            for output in outputs:
-                raw_text = output.outputs[0].text
-                finish_reason = getattr(output.outputs[0], 'finish_reason', 'stop')
-                parsed = parse_harmony_response(raw_text)
-
-                all_responses.append({
-                    "content": parsed["final"],
-                    "finish_reason": str(finish_reason) if finish_reason else "stop",
-                    "reasoning": parsed.get("reasoning")
-                })
-
-            chunks_processed += 1
-            gc.collect()
+        # Sort by index and remove index field
+        results = sorted(results, key=lambda x: x["index"])
+        all_responses = [{k: v for k, v in r.items() if k != "index"} for r in results]
 
         processing_time_ms = int((time.time() - start_time) * 1000)
-        logger.info(f"Batch completed: {total_requests} prompts in {chunks_processed} chunks, {processing_time_ms}ms total ({processing_time_ms/total_requests:.0f}ms/prompt)")
+        logger.info(f"Batch completed: {total_requests} prompts, {processing_time_ms}ms total ({processing_time_ms/total_requests:.0f}ms/prompt)")
 
         return JSONResponse({
             "responses": all_responses,
             "batch_size": total_requests,
             "processing_time_ms": processing_time_ms,
-            "avg_time_per_prompt_ms": processing_time_ms / total_requests,
-            "chunks_processed": chunks_processed,
-            "max_chunk_size": MAX_BATCH_SIZE
+            "avg_time_per_prompt_ms": processing_time_ms / total_requests
         })
 
     except Exception as e:
         logger.error(f"Batch error: {e}")
-        gc.collect()
         return JSONResponse(
             status_code=500,
             content={"error": {"message": str(e), "type": "internal_error"}}
@@ -740,8 +667,8 @@ app = gr.mount_gradio_app(
 )
 
 if __name__ == "__main__":
-    # Initialize model (must be in main block for MPI support)
-    initialize_model()
+    # Initialize tokenizer and HTTP client
+    initialize()
 
     # Run the server
     uvicorn.run(

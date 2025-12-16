@@ -1,23 +1,12 @@
-FROM {{ container_registry }}/library/tensorrt-llm-base:1.2.0rc2
+FROM {{ container_registry }}/library/tensorrt-llm-base:25.11
 
 # Copy application code
 COPY server.py .
 COPY thinkube_theme.py .
 COPY entrypoint.sh .
 
-# Copy Thinkube icons (pre-generated)
+# Copy Thinkube icons
 COPY tk_ai.svg tk_ai.png /app/icons/
-
-# Copy and install any additional template-specific requirements
-COPY requirements.txt .
-RUN if [ -s requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi
-
-# Pre-download tiktoken encoding files for openai-harmony (offline support)
-# Required because HF_HUB_OFFLINE=1 blocks runtime downloads
-RUN mkdir -p /app/tiktoken_encodings && \
-    curl -sL -o /app/tiktoken_encodings/o200k_base.tiktoken \
-    "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken"
-ENV TIKTOKEN_ENCODINGS_BASE=/app/tiktoken_encodings
 
 # Make entrypoint executable
 RUN chmod +x entrypoint.sh
@@ -25,8 +14,8 @@ RUN chmod +x entrypoint.sh
 # The base image already has:
 # - Working directory set to /app
 # - Icons directory created
-# - Common dependencies pre-installed (openai, gradio)
-# - TensorRT-LLM runtime and tools
+# - All dependencies: TensorRT-LLM, openai, gradio, mlflow, openai-harmony
+# - Pre-downloaded tiktoken encodings for offline support
 
 # Model ID and HF token passed as environment variables at deployment time
 # Not baked into the image to enable image reuse across deployments
