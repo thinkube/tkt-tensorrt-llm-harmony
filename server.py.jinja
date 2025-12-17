@@ -17,8 +17,8 @@ import uvicorn
 from transformers import AutoTokenizer
 from thinkube_theme import create_thinkube_theme, THINKUBE_CSS
 
-# Official OpenAI harmony format parsing
-from openai_harmony import load_harmony_encoding, HarmonyEncodingName, Role
+# Note: trtllm-serve handles harmony format parsing internally
+# It returns structured content, reasoning, and tool_calls fields
 
 # Harmony format stop tokens (from openai-harmony spec)
 # These tokens indicate model should stop generating:
@@ -95,12 +95,10 @@ def generate_response(message: str, history: list, temperature: float = 0.7, max
         response.raise_for_status()
         result = response.json()
 
-    # Extract raw response text
-    raw_text = result["choices"][0]["message"]["content"]
-
-    # Parse harmony format to extract final response
-    parsed = parse_harmony_response(raw_text)
-    yield parsed["final"]
+    # Extract response from trtllm-serve (already parsed harmony format)
+    msg = result["choices"][0]["message"]
+    content = msg.get("content") or ""
+    yield content
 
 # Create Thinkube-styled Gradio interface
 thinkube_theme = create_thinkube_theme()
@@ -145,99 +143,10 @@ async def health_check():
 # ============================================================================
 # OpenAI-Compatible API Endpoints (for LiteLLM integration)
 # ============================================================================
-
-# Initialize harmony encoding
-_harmony_enc = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
-
-
-# ============================================================================
-# Harmony Response Parsing
-# ============================================================================
-{% raw %}
-def parse_harmony_response(text: str) -> dict:
-    """
-    Parse harmony format response to extract channels and tool calls.
-    Uses the official openai-harmony package.
-
-    Returns dict with:
-    - 'final': user-facing response
-    - 'reasoning': chain-of-thought (analysis channel)
-    - 'tool_calls': list of tool calls [{id, type, function: {name, arguments}}]
-    - 'parse_error': error message if parsing failed (with raw text as fallback)
-
-    Args:
-        text: Raw text from TensorRT-LLM output (with skip_special_tokens=False)
-    """
-    # TensorRT-LLM returns only the completion, not the generation prompt.
-    # The harmony parser expects <|start|>assistant at the beginning, but TensorRT-LLM
-    # excludes it since it was part of the prompt. Prepend it for proper parsing.
-    # See: https://github.com/openai/harmony/issues/80
-    if not text.startswith("<|start|>"):
-        text = "<|start|>assistant" + text
-
-    try:
-        tokens = _harmony_enc.encode(text, allowed_special="all")
-        messages = _harmony_enc.parse_messages_from_completion_tokens(
-            tokens, role=Role.ASSISTANT, strict=False
-        )
-    except Exception as e:
-        # Raise with detailed error info - let the endpoint return a proper HTTP error
-        logger.error(f"Harmony parsing failed: {e}")
-        logger.error(f"Raw text: {text}")
-        raise ValueError(f"Harmony parsing failed: {e}") from e
-
-    final_parts = []
-    reasoning_parts = []
-    tool_calls = []
-    tool_call_counter = 0
-
-    for msg in messages:
-        channel = getattr(msg, 'channel', None)
-        recipient = getattr(msg, 'recipient', None)
-        content = msg.content
-
-        # Extract text content
-        if isinstance(content, list):
-            content = ''.join(
-                c.text if hasattr(c, 'text') else str(c)
-                for c in content
-            )
-
-        if channel == 'final':
-            final_parts.append(content)
-        elif channel == 'analysis':
-            reasoning_parts.append(content)
-        elif channel == 'commentary' and recipient and recipient.startswith('functions.'):
-            # This is a tool call: commentary to=functions.xxx
-            func_name = recipient.replace('functions.', '')
-            # Detect malformed function names (model quirk - candidate for fine-tuning)
-            is_malformed = '<|' in func_name or func_name != func_name.strip()
-            tool_call_counter += 1
-            tool_calls.append({
-                "id": f"call_{tool_call_counter:04d}_{int(time.time() * 1000) % 10000}",
-                "type": "function",
-                "function": {
-                    "name": func_name,
-                    "arguments": content
-                },
-                "_raw_recipient": recipient,
-                "_is_malformed": is_malformed
-            })
-
-    # Build debug info (only one tool call per response due to <|call|> stop token)
-    tool_call = tool_calls[0] if tool_calls else None
-    debug_info = {"raw_harmony_text": text}
-    if tool_call:
-        debug_info["raw_recipient"] = tool_call.pop("_raw_recipient")
-        debug_info["is_malformed"] = tool_call.pop("_is_malformed")
-
-    return {
-        "final": ''.join(final_parts),
-        "reasoning": ''.join(reasoning_parts) if reasoning_parts else None,
-        "tool_calls": tool_calls if tool_calls else None,
-        "_debug": debug_info
-    }
-{% endraw %}
+# Note: trtllm-serve handles harmony format parsing internally and returns:
+# - message.content: final user-facing response
+# - message.reasoning: chain-of-thought (analysis channel)
+# - message.tool_calls: list of tool calls [{id, type, function: {name, arguments}}]
 
 
 async def _handle_batch_completions(body: dict, batch_requests: list):
@@ -308,21 +217,23 @@ async def _handle_batch_completions(body: dict, batch_requests: list):
         response.raise_for_status()
         result = response.json()
 
-        raw_text = result["choices"][0]["message"]["content"]
+        # trtllm-serve returns structured harmony response
+        msg = result["choices"][0]["message"]
+        content = msg.get("content") or ""
+        reasoning = msg.get("reasoning")
         finish_reason = result["choices"][0].get("finish_reason", "stop")
-        parsed = parse_harmony_response(raw_text)
 
         choice = {
             "index": idx,
             "message": {
                 "role": "assistant",
-                "content": parsed["final"]
+                "content": content
             },
             "finish_reason": finish_reason
         }
 
-        if include_reasoning and parsed.get("reasoning"):
-            choice["reasoning"] = parsed["reasoning"]
+        if include_reasoning and reasoning:
+            choice["reasoning"] = reasoning
 
         return choice
 
@@ -386,7 +297,6 @@ async def openai_chat_completions(request: Request):
         stream = body.get('stream', False)
         top_p = body.get('top_p', 0.9)
         include_reasoning = body.get('include_reasoning', False)  # Optional: include chain-of-thought
-        include_debug = body.get('include_debug', False)  # Optional: include raw harmony text for diagnostics
 
         logger.info(f"=== API Request ===")
         logger.info(f"max_tokens: {max_tokens}, temperature: {temperature}, top_p: {top_p}")
@@ -412,29 +322,23 @@ async def openai_chat_completions(request: Request):
         response.raise_for_status()
         result = response.json()
 
-        raw_text = result["choices"][0]["message"]["content"] or ""
+        # trtllm-serve returns structured harmony response
+        msg = result["choices"][0]["message"]
+        response_text = msg.get("content") or ""
+        reasoning_text = msg.get("reasoning") if include_reasoning else None
+        tool_calls = msg.get("tool_calls") or None
+        # Convert empty list to None for consistency
+        if tool_calls is not None and len(tool_calls) == 0:
+            tool_calls = None
         finish_reason = result["choices"][0].get("finish_reason", "stop")
 
-        logger.info(f"=== Raw Response ===")
-        logger.info(f"Length (chars): {len(raw_text)}")
+        logger.info(f"=== Response from trtllm-serve ===")
+        logger.info(f"Content length (chars): {len(response_text)}")
+        logger.info(f"Reasoning: {reasoning_text is not None}")
+        logger.info(f"Tool calls: {len(tool_calls) if tool_calls else 0}")
         logger.info(f"Finish reason: {finish_reason}")
-        logger.info(f"RAW_RESPONSE_START>>>{raw_text}<<<RAW_RESPONSE_END")
-
-        # Parse harmony format to extract final response and tool calls
-        parsed = parse_harmony_response(raw_text)
-        response_text = parsed["final"]
-        tool_calls = parsed.get("tool_calls")
-
-        logger.info(f"=== Parsed Response ===")
-        logger.info(f"Harmony parsing applied: {parsed['reasoning'] is not None}")
-        logger.info(f"Final length (chars): {len(response_text)}")
-        logger.info(f"Tool calls detected: {len(tool_calls) if tool_calls else 0}")
         if tool_calls:
-            logger.info(f"Tool calls: {[tc['function']['name'] for tc in tool_calls]}")
-        logger.info(f"PARSED_RESPONSE_START>>>{response_text}<<<PARSED_RESPONSE_END")
-
-        # Optionally include reasoning in a separate field
-        reasoning_text = parsed["reasoning"] if include_reasoning else None
+            logger.info(f"Tool call names: {[tc['function']['name'] for tc in tool_calls]}")
 
         # Generate unique ID
         completion_id = f"chatcmpl-{int(time.time() * 1000)}"
@@ -518,10 +422,6 @@ async def openai_chat_completions(request: Request):
         # Optionally include reasoning (chain-of-thought) in response
         if reasoning_text:
             response_data["reasoning"] = reasoning_text
-
-        # Optionally include debug info for fine-tuning data collection
-        if include_debug:
-            response_data["_debug"] = parsed.get("_debug", {})
 
         return JSONResponse(response_data)
 
@@ -619,15 +519,17 @@ async def batch_completions(request: Request):
             response.raise_for_status()
             result = response.json()
 
-            raw_text = result["choices"][0]["message"]["content"] or ""
+            # trtllm-serve returns structured harmony response
+            msg = result["choices"][0]["message"]
+            content = msg.get("content") or ""
+            reasoning = msg.get("reasoning")
             finish_reason = result["choices"][0].get("finish_reason", "stop")
-            parsed = parse_harmony_response(raw_text)
 
             return {
                 "index": idx,
-                "content": parsed["final"],
+                "content": content,
                 "finish_reason": finish_reason,
-                "reasoning": parsed.get("reasoning")
+                "reasoning": reasoning
             }
 
         # Run all requests concurrently
