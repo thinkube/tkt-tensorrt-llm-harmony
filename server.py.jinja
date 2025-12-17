@@ -43,12 +43,14 @@ app = FastAPI(title="{{ project_name }} TensorRT-LLM Server")
 # Global tokenizer (for chat template formatting)
 tokenizer = None
 
-# HTTP client for backend calls (with connection pooling)
+# HTTP clients for backend calls (with connection pooling)
+# Async client for FastAPI endpoints, sync client for Gradio
 http_client = None
+sync_http_client = None
 
 def initialize():
-    """Initialize tokenizer and HTTP client"""
-    global tokenizer, http_client
+    """Initialize tokenizer and HTTP clients"""
+    global tokenizer, http_client, sync_http_client
     print(f"Model ID: {MODEL_ID}")
     print(f"Model path: {MODEL_PATH}")
     print(f"Backend URL: {TRTLLM_BACKEND_URL}")
@@ -57,17 +59,23 @@ def initialize():
     print("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
 
-    # Initialize HTTP client with connection pooling for backend calls
+    # Initialize async HTTP client for FastAPI endpoints
     http_client = httpx.AsyncClient(
         base_url=TRTLLM_BACKEND_URL,
-        timeout=httpx.Timeout(300.0, connect=10.0),  # 5 min for generation, 10s for connect
+        timeout=httpx.Timeout(300.0, connect=10.0),
     )
 
-    print(f"✓ Tokenizer loaded, connected to trtllm-serve backend")
+    # Initialize sync HTTP client for Gradio (reused across requests)
+    sync_http_client = httpx.Client(
+        base_url=TRTLLM_BACKEND_URL,
+        timeout=httpx.Timeout(300.0, connect=10.0),
+    )
+
+    print(f"✓ Tokenizer loaded, HTTP clients initialized")
 
 def generate_response(message: str, history: list, temperature: float = 0.7, max_tokens: int = 512):
     """Generate response via trtllm-serve backend with harmony chat template"""
-    import httpx
+    global sync_http_client
 
     logger.info(f"=== Gradio generate_response ===")
     logger.info(f"message type: {type(message)}, value: {message!r}")
@@ -98,24 +106,22 @@ def generate_response(message: str, history: list, temperature: float = 0.7, max
 
     logger.info(f"Final messages to send: {messages}")
 
-    # Call trtllm-serve backend (OpenAI-compatible API)
-    # The backend handles chat template application internally
-    with httpx.Client(base_url=TRTLLM_BACKEND_URL, timeout=300.0) as client:
-        response = client.post(
-            "/v1/chat/completions",
-            json={
-                "model": MODEL_ID,
-                "messages": messages,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-                "top_p": 0.9,
-                "stop": HARMONY_STOP_TOKENS,
-            }
-        )
-        if response.status_code != 200:
-            logger.error(f"Backend error {response.status_code}: {response.text[:2000]}")
-        response.raise_for_status()
-        result = response.json()
+    # Call trtllm-serve backend using pooled sync client
+    response = sync_http_client.post(
+        "/v1/chat/completions",
+        json={
+            "model": MODEL_ID,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "top_p": 0.9,
+            "stop": HARMONY_STOP_TOKENS,
+        }
+    )
+    if response.status_code != 200:
+        logger.error(f"Backend error {response.status_code}: {response.text[:2000]}")
+    response.raise_for_status()
+    result = response.json()
 
     # Extract response from trtllm-serve (already parsed harmony format)
     msg = result["choices"][0]["message"]
