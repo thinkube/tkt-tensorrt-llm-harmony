@@ -85,12 +85,27 @@ def generate_response(message: str, history: list, temperature: float = 0.7, max
         logger.info(f"history sample: {history[:2]}")
 
     # Build messages list from history
+    # Gradio 6.x sends: {"role": "user", "content": [{"type": "text", "text": "..."}], "metadata": None, "options": None}
+    # trtllm-serve expects: {"role": "user", "content": "..."}
     messages = []
     if history:
         for item in history:
             if isinstance(item, dict):
-                # Already in message format
-                messages.append(item)
+                role = item.get("role", "user")
+                content = item.get("content", "")
+                # Normalize content: Gradio 6.x uses [{"type": "text", "text": "..."}]
+                if isinstance(content, list):
+                    # Extract text from content blocks
+                    text_parts = []
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            text_parts.append(block.get("text", ""))
+                        elif isinstance(block, str):
+                            text_parts.append(block)
+                    content = "".join(text_parts)
+                # Only include role and content (strip metadata, options, etc.)
+                if content:
+                    messages.append({"role": role, "content": content})
             elif isinstance(item, (list, tuple)) and len(item) == 2:
                 # Old tuple format: (user_msg, assistant_msg)
                 user_msg, assistant_msg = item
