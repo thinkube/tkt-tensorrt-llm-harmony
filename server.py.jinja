@@ -114,8 +114,6 @@ demo = gr.ChatInterface(
         ["Can you explain quantum computing in simple terms?", 0.7, 512],
         ["Write a Python function to calculate fibonacci numbers", 0.7, 512],
     ],
-    theme=thinkube_theme,
-    css=THINKUBE_CSS,
     analytics_enabled=False,
     additional_inputs=[
         gr.Slider(0.1, 2.0, value=0.7, label="Temperature"),
@@ -658,11 +656,13 @@ async def batch_completions(request: Request):
         )
 
 
-# Mount Gradio app with Thinkube favicon
+# Mount Gradio app with Thinkube theme and favicon (Gradio 6.x: theme/css go in mount_gradio_app)
 app = gr.mount_gradio_app(
     app,
     demo,
     path="/",
+    theme=thinkube_theme,
+    css=THINKUBE_CSS,
     favicon_path="/app/icons/tk_ai.png"  # Thinkube AI icon
 )
 
