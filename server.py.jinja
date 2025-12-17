@@ -69,11 +69,9 @@ def generate_response(message: str, history: list, temperature: float = 0.7, max
     """Generate response via trtllm-serve backend with harmony chat template"""
     import httpx
 
-    # Convert Gradio history to OpenAI messages format
-    messages = []
-    for human, assistant in history:
-        messages.append({"role": "user", "content": human})
-        messages.append({"role": "assistant", "content": assistant})
+    # Gradio 6.x uses OpenAI-style message format for history
+    # history is already a list of {"role": "user"|"assistant", "content": ...}
+    messages = list(history)  # Copy history
 
     # Add current message
     messages.append({"role": "user", "content": message})
