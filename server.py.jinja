@@ -168,13 +168,14 @@ async def health_check():
     try:
         # Check if trtllm-serve backend is healthy
         response = await http_client.get("/health")
-        backend_health = response.json() if response.status_code == 200 else {"status": "unknown"}
+        # trtllm-serve returns empty body with 200 OK when healthy
+        backend_status = "healthy" if response.status_code == 200 else "unhealthy"
         return {
             "status": "healthy",
             "model": MODEL_ID,
             "model_path": MODEL_PATH,
             "engine": "trtllm-serve (MXFP4)",
-            "backend": backend_health
+            "backend": {"status": backend_status}
         }
     except Exception as e:
         return {
