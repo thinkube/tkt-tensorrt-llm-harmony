@@ -4,6 +4,9 @@ metadata:
   name: "{{ project_name }}"
 
 spec:
+  deployment:
+    type: app
+
   containers:
     - name: inference
       build: .
@@ -11,10 +14,10 @@ spec:
       size: xlarge
       gpu:
         count: 1
-        memory: "80Gi"  # Auto-gets: hostIPC=true + /mlflow-models mount
+        memory: "80Gi"
       health: /health
       test:
-        enabled: false  # Testing ML models requires GPU, skip in CI/CD
+        enabled: false
 
   routes:
     - path: /
