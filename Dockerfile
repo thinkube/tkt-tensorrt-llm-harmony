@@ -1,4 +1,5 @@
-FROM {{ container_registry }}/library/tensorrt-llm-base:25.11
+ARG CONTAINER_REGISTRY
+FROM ${CONTAINER_REGISTRY}/library/tensorrt-llm-base:25.11
 
 # Copy application code
 COPY server.py .

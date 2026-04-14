@@ -1,8 +1,10 @@
 #!/bin/bash
 set -e
 
+MODEL_ID="${MODEL_ID:?MODEL_ID environment variable is required}"
+
 echo "=== TensorRT-LLM Inference Server Startup ==="
-echo "Model: {{ model_id }}"
+echo "Model: ${MODEL_ID}"
 
 # Fix LD_LIBRARY_PATH to include NVIDIA cuda_nvrtc libraries
 # Required for TensorRT-LLM bindings to find libnvrtc.so.12
@@ -48,7 +50,7 @@ token_response.raise_for_status()
 access_token = token_response.json()['access_token']
 
 # Query MLflow for model
-model_id = "{{ model_id }}"
+model_id = os.environ['MODEL_ID']
 model_name = model_id.replace('/', '-')
 mlflow_url = os.environ.get('MLFLOW_TRACKING_URI', 'http://mlflow.mlflow.svc.cluster.local:5000')
 
@@ -94,7 +96,7 @@ if not os.path.exists(model_path):
     print(f"ERROR: Model path does not exist: {model_path}", file=sys.stderr)
     sys.exit(1)
 
-print(f"✓ Model found at: {model_path}", file=sys.stderr)
+print(f"Model found at: {model_path}", file=sys.stderr)
 
 # Output the path to stdout (captured by shell)
 print(model_path)
@@ -141,7 +143,7 @@ MAX_RETRIES=120  # 10 minutes max (model loading can take time)
 RETRY_COUNT=0
 while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
     if curl -s http://127.0.0.1:8355/health > /dev/null 2>&1; then
-        echo "✓ trtllm-serve is ready!"
+        echo "trtllm-serve is ready!"
         break
     fi
     RETRY_COUNT=$((RETRY_COUNT + 1))

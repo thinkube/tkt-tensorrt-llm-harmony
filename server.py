@@ -30,15 +30,17 @@ HARMONY_STOP_TOKENS = ["<|return|>", "<|call|>"]
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Model configuration from template parameter
-MODEL_ID = "{{ model_id }}"
+# Model configuration from environment
+MODEL_ID = os.environ.get("MODEL_ID", "nvidia/Phi-4-multimodal-instruct-FP4")
+APP_NAME = os.environ.get("APP_NAME", "tensorrt-llm")
+APP_TITLE = os.environ.get("APP_TITLE", APP_NAME)
 MODEL_PATH = os.environ.get('MODEL_PATH')
 
 # trtllm-serve backend URL (started by entrypoint.sh)
 TRTLLM_BACKEND_URL = "http://127.0.0.1:8355"
 
 # Initialize FastAPI app
-app = FastAPI(title="{{ project_name }} TensorRT-LLM Server")
+app = FastAPI(title=f"{APP_NAME} TensorRT-LLM Server")
 
 # Global tokenizer (for chat template formatting)
 tokenizer = None
@@ -71,7 +73,7 @@ def initialize():
         timeout=httpx.Timeout(300.0, connect=10.0),
     )
 
-    print(f"✓ Tokenizer loaded, HTTP clients initialized")
+    print(f"Tokenizer loaded, HTTP clients initialized")
 
 def generate_response(message: str, history: list, temperature: float = 0.7, max_tokens: int = 512):
     """Generate response via trtllm-serve backend with harmony chat template"""
@@ -148,7 +150,7 @@ thinkube_theme = create_thinkube_theme()
 
 demo = gr.ChatInterface(
     generate_response,
-    title="{{ project_title | default(project_name) }}",
+    title=APP_TITLE,
     description=f"Chat with {MODEL_ID} (powered by TensorRT-LLM with NVFP4)",
     examples=[
         ["Hello! How are you?", 0.7, 512],

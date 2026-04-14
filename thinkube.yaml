@@ -1,7 +1,5 @@
 apiVersion: thinkube.io/v1
 kind: ThinkubeDeployment
-metadata:
-  name: "{{ project_name }}"
 
 spec:
   deployment:
