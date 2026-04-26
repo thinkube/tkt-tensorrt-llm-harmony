@@ -28,12 +28,13 @@ from thinkube_theme import create_thinkube_theme, THINKUBE_CSS
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-HARMONY_STOP_TOKENS = ["<|return|>", "<|call|>"]
-
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 INITIAL_MODEL_ID = os.environ.get("MODEL_ID", "nvidia/Phi-4-multimodal-instruct-FP4")
+
+_initial_stop_tokens_raw = os.environ.get("STOP_TOKENS", "")
+INITIAL_STOP_TOKENS = json.loads(_initial_stop_tokens_raw) if _initial_stop_tokens_raw.strip() else []
 APP_NAME = os.environ.get("APP_NAME", "tensorrt-llm")
 APP_TITLE = os.environ.get("APP_TITLE", APP_NAME)
 
@@ -124,6 +125,9 @@ class TrtllmBackend:
         self.start_time: float | None = None
         self.error: str | None = None
         self._switch_lock = threading.Lock()
+        self.stop_tokens: list[str] = INITIAL_STOP_TOKENS
+        self.reasoning_format: str | None = None
+        self.tool_use: bool = False
 
     @property
     def uptime_seconds(self) -> int:
@@ -203,17 +207,22 @@ class TrtllmBackend:
             time.sleep(5)
         return False
 
-    def switch_model(self, new_model_id: str) -> dict:
+    def switch_model(self, new_model_id: str, metadata: dict | None = None) -> dict:
         """Switch to a different model. Blocks until complete. Thread-safe."""
         with self._switch_lock:
-            return self._do_switch(new_model_id)
+            return self._do_switch(new_model_id, metadata)
 
-    def _do_switch(self, new_model_id: str) -> dict:
+    def _do_switch(self, new_model_id: str, metadata: dict | None = None) -> dict:
         previous_model = self.model_id
         previous_path = self.model_path
+        previous_stop_tokens = self.stop_tokens
+        previous_reasoning_format = self.reasoning_format
+        previous_tool_use = self.tool_use
         switch_start = time.time()
 
         if new_model_id == self.model_id and self.status == "serving":
+            if metadata:
+                self._apply_metadata(metadata)
             return {
                 "previous_model": previous_model,
                 "current_model": self.model_id,
@@ -239,6 +248,9 @@ class TrtllmBackend:
 
         # Start new backend
         if self.start(new_model_path, new_model_id):
+            if metadata:
+                self._apply_metadata(metadata)
+
             global tokenizer
             try:
                 tokenizer = AutoTokenizer.from_pretrained(new_model_path)
@@ -253,8 +265,11 @@ class TrtllmBackend:
                 "switch_time_seconds": round(time.time() - switch_start, 1)
             }
 
-        # Rollback to previous model
+        # Rollback to previous model and metadata
         logger.warning(f"Failed to start {new_model_id}, rolling back to {previous_model}")
+        self.stop_tokens = previous_stop_tokens
+        self.reasoning_format = previous_reasoning_format
+        self.tool_use = previous_tool_use
         if previous_path and self.start(previous_path, previous_model):
             return {
                 "previous_model": previous_model,
@@ -269,6 +284,17 @@ class TrtllmBackend:
             "status": "error",
             "error": f"Failed to load {new_model_id} and failed to rollback to {previous_model}"
         }
+
+    def _apply_metadata(self, metadata: dict):
+        if "stop_tokens" in metadata:
+            self.stop_tokens = metadata["stop_tokens"]
+            logger.info(f"Stop tokens updated: {self.stop_tokens}")
+        if "reasoning_format" in metadata:
+            self.reasoning_format = metadata["reasoning_format"]
+            logger.info(f"Reasoning format updated: {self.reasoning_format}")
+        if "tool_use" in metadata:
+            self.tool_use = metadata["tool_use"]
+            logger.info(f"Tool use updated: {self.tool_use}")
 
 
 backend = TrtllmBackend()
@@ -358,7 +384,7 @@ def generate_response(message: str, history: list, temperature: float = 0.7, max
             "temperature": temperature,
             "max_tokens": max_tokens,
             "top_p": 0.9,
-            "stop": HARMONY_STOP_TOKENS,
+            **({"stop": backend.stop_tokens} if backend.stop_tokens else {}),
         }
     )
     if response.status_code != 200:
@@ -447,6 +473,9 @@ async def admin_current_model():
         "status": backend.status,
         "engine": "trtllm-serve",
         "uptime_seconds": backend.uptime_seconds,
+        "stop_tokens": backend.stop_tokens,
+        "reasoning_format": backend.reasoning_format,
+        "tool_use": backend.tool_use,
     })
 
 
@@ -472,8 +501,16 @@ async def admin_switch_model(request: Request):
             content={"error": "Backend is still starting, cannot switch models yet"}
         )
 
+    metadata = {}
+    if "stop_tokens" in body:
+        metadata["stop_tokens"] = body["stop_tokens"]
+    if "reasoning_format" in body:
+        metadata["reasoning_format"] = body["reasoning_format"]
+    if "tool_use" in body:
+        metadata["tool_use"] = body["tool_use"]
+
     async with _admin_switch_lock:
-        result = await asyncio.to_thread(backend.switch_model, new_model_id)
+        result = await asyncio.to_thread(backend.switch_model, new_model_id, metadata or None)
 
     if result.get("status") == "error":
         return JSONResponse(status_code=500, content=result)
@@ -560,7 +597,7 @@ async def _handle_batch_completions(body: dict, batch_requests: list):
                 "temperature": temperature,
                 "max_tokens": max_tokens,
                 "top_p": top_p,
-                "stop": HARMONY_STOP_TOKENS,
+                **({"stop": backend.stop_tokens} if backend.stop_tokens else {}),
             }
         )
         response.raise_for_status()
@@ -653,7 +690,7 @@ async def openai_chat_completions(request: Request):
             "temperature": temperature,
             "max_tokens": max_tokens,
             "top_p": top_p,
-            "stop": HARMONY_STOP_TOKENS,
+            **({"stop": backend.stop_tokens} if backend.stop_tokens else {}),
         }
         if tools:
             backend_payload["tools"] = tools
@@ -841,7 +878,7 @@ async def batch_completions(request: Request):
                     "temperature": temperature,
                     "max_tokens": max_tokens,
                     "top_p": top_p,
-                    "stop": HARMONY_STOP_TOKENS,
+                    **({"stop": backend.stop_tokens} if backend.stop_tokens else {}),
                 }
             )
             response.raise_for_status()
