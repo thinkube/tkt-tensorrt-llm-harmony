@@ -2,19 +2,11 @@ apiVersion: thinkube.io/v1
 kind: TemplateManifest
 metadata:
   name: tkt-tensorrt-llm
-  title: TensorRT-LLM Inference Server (MLflow)
-  description: NVIDIA TensorRT-LLM optimized inference loading models directly from MLflow Model Registry
+  title: TensorRT-LLM Inference Server
+  description: NVIDIA TensorRT-LLM optimized inference — model managed by LLM Gateway
   version: 1.0.0
   author: Alejandro Martínez Corriá
-  tags: ["ai", "llm", "tensorrt-llm", "nvidia", "gradio", "inference", "text-generation", "gpu", "mlflow"]
+  tags: ["ai", "llm", "tensorrt-llm", "nvidia", "inference", "text-generation", "gpu"]
 
-parameters:
-  - name: model_id
-    type: choice
-    description: Select a downloaded TensorRT model
-    dynamic_source: "model_catalog"
-    filter:
-      server_type: "tensorrt-llm"
-      is_downloaded: true
-    default: "nvidia/Phi-4-multimodal-instruct-FP4"
-    
+parameters: []
+

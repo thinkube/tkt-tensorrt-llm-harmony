@@ -3,7 +3,8 @@ kind: ThinkubeDeployment
 
 spec:
   deployment:
-    type: app
+    type: component
+    name: tensorrt
 
   containers:
     - name: inference
