@@ -1,15 +1,24 @@
 #!/usr/bin/env python3
 """
-TensorRT-LLM Inference Server with Gradio UI
-For text generation models with MXFP4 support on Blackwell (DGX Spark GB10)
-Uses trtllm-serve backend for optimized MXFP4 inference
+TensorRT-LLM Inference Server with Gradio UI and Admin Management Endpoints
+
+Manages the trtllm-serve subprocess lifecycle, proxies inference requests,
+and exposes /admin/* endpoints for model switching by thinkube-control.
 """
 
 import os
+import sys
 import json
 import time
 import logging
+import asyncio
+import subprocess
+import threading
+import atexit
+
 import httpx
+import requests
+import urllib3
 import gradio as gr
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -17,63 +26,285 @@ import uvicorn
 from transformers import AutoTokenizer
 from thinkube_theme import create_thinkube_theme, THINKUBE_CSS
 
-# Note: trtllm-serve handles harmony format parsing internally
-# It returns structured content, reasoning, and tool_calls fields
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Harmony format stop tokens (from openai-harmony spec)
-# These tokens indicate model should stop generating:
-# - <|return|> (200002): Model is done with final response
-# - <|call|> (200012): Model wants to call a tool
 HARMONY_STOP_TOKENS = ["<|return|>", "<|call|>"]
 
-# Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Model configuration from environment
-MODEL_ID = os.environ.get("MODEL_ID", "nvidia/Phi-4-multimodal-instruct-FP4")
+INITIAL_MODEL_ID = os.environ.get("MODEL_ID", "nvidia/Phi-4-multimodal-instruct-FP4")
 APP_NAME = os.environ.get("APP_NAME", "tensorrt-llm")
 APP_TITLE = os.environ.get("APP_TITLE", APP_NAME)
-MODEL_PATH = os.environ.get('MODEL_PATH')
 
-# trtllm-serve backend URL (started by entrypoint.sh)
 TRTLLM_BACKEND_URL = "http://127.0.0.1:8355"
 
-# Initialize FastAPI app
 app = FastAPI(title=f"{APP_NAME} TensorRT-LLM Server")
 
-# Global tokenizer (for chat template formatting)
 tokenizer = None
-
-# HTTP clients for backend calls (with connection pooling)
-# Async client for FastAPI endpoints, sync client for Gradio
 http_client = None
 sync_http_client = None
 
+
+# ============================================================================
+# MLflow Model Resolution
+# ============================================================================
+
+def query_mlflow_model_path(model_id: str) -> str:
+    """Query MLflow to resolve model_id to a local artifact path on JuiceFS."""
+    token_url = os.environ['MLFLOW_KEYCLOAK_TOKEN_URL']
+    token_response = requests.post(
+        token_url,
+        data={
+            'grant_type': 'password',
+            'client_id': os.environ['MLFLOW_KEYCLOAK_CLIENT_ID'],
+            'client_secret': os.environ['MLFLOW_CLIENT_SECRET'],
+            'username': os.environ['MLFLOW_AUTH_USERNAME'],
+            'password': os.environ['MLFLOW_AUTH_PASSWORD'],
+            'scope': 'openid'
+        },
+        verify=False,
+        timeout=30
+    )
+    token_response.raise_for_status()
+    access_token = token_response.json()['access_token']
+
+    model_name = model_id.replace('/', '-')
+    mlflow_url = os.environ.get('MLFLOW_TRACKING_URI', 'http://mlflow.mlflow.svc.cluster.local:5000')
+
+    response = requests.get(
+        f"{mlflow_url}/api/2.0/mlflow/model-versions/search",
+        params={'filter': f"name='{model_name}'"},
+        headers={'Authorization': f'Bearer {access_token}'},
+        verify=False,
+        timeout=30
+    )
+    response.raise_for_status()
+
+    versions = response.json().get('model_versions', [])
+    if not versions:
+        raise ValueError(f"Model {model_name} not found in MLflow registry")
+
+    latest = max(versions, key=lambda v: int(v['version']))
+    run_id = latest['run_id']
+    logger.info(f"Found model version {latest['version']} with run_id: {run_id}")
+
+    run_response = requests.get(
+        f"{mlflow_url}/api/2.0/mlflow/runs/get",
+        params={'run_id': run_id},
+        headers={'Authorization': f'Bearer {access_token}'},
+        verify=False,
+        timeout=30
+    )
+    run_response.raise_for_status()
+    experiment_id = run_response.json()['run']['info']['experiment_id']
+    logger.info(f"Experiment ID: {experiment_id}")
+
+    model_path = f'/mlflow-models/artifacts/{experiment_id}/{run_id}/artifacts/model'
+
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model path does not exist: {model_path}")
+
+    logger.info(f"Resolved {model_id} -> {model_path}")
+    return model_path
+
+
+# ============================================================================
+# trtllm-serve Subprocess Management
+# ============================================================================
+
+class TrtllmBackend:
+    """Manages the trtllm-serve subprocess lifecycle."""
+
+    def __init__(self):
+        self.process: subprocess.Popen | None = None
+        self.model_id: str | None = None
+        self.model_path: str | None = None
+        self.status: str = "stopped"
+        self.start_time: float | None = None
+        self.error: str | None = None
+        self._switch_lock = threading.Lock()
+
+    @property
+    def uptime_seconds(self) -> int:
+        if self.start_time and self.status == "serving":
+            return int(time.time() - self.start_time)
+        return 0
+
+    def start(self, model_path: str, model_id: str, wait_timeout: int = 600) -> bool:
+        """Start trtllm-serve with the given model. Blocks until ready or timeout."""
+        self.model_path = model_path
+        self.model_id = model_id
+        self.status = "starting"
+        self.error = None
+
+        logger.info(f"Starting trtllm-serve for {model_id} from {model_path}")
+
+        self.process = subprocess.Popen(
+            [
+                "trtllm-serve", model_path,
+                "--backend", "pytorch",
+                "--extra_llm_api_options", "/tmp/extra_llm_api_options.yaml",
+                "--host", "127.0.0.1",
+                "--port", "8355",
+                "--log_level", "info",
+            ]
+        )
+
+        logger.info(f"trtllm-serve started with PID {self.process.pid}")
+
+        if self._wait_for_ready(wait_timeout):
+            self.status = "serving"
+            self.start_time = time.time()
+            logger.info(f"trtllm-serve is ready, serving {model_id}")
+            return True
+        else:
+            self.status = "error"
+            self.error = "trtllm-serve failed to start within timeout"
+            logger.error(self.error)
+            self._kill_process()
+            return False
+
+    def stop(self):
+        """Stop the current trtllm-serve process."""
+        self._kill_process()
+        self.status = "stopped"
+
+    def _kill_process(self):
+        if self.process and self.process.poll() is None:
+            logger.info(f"Stopping trtllm-serve (PID {self.process.pid})")
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                logger.warning("trtllm-serve did not stop gracefully, killing")
+                self.process.kill()
+                self.process.wait()
+        self.process = None
+
+    def _wait_for_ready(self, timeout: int = 600) -> bool:
+        """Poll trtllm-serve health endpoint until ready."""
+        deadline = time.time() + timeout
+        check_count = 0
+        while time.time() < deadline:
+            try:
+                r = httpx.get(f"{TRTLLM_BACKEND_URL}/health", timeout=5)
+                if r.status_code == 200:
+                    return True
+            except Exception:
+                pass
+            if self.process is None or self.process.poll() is not None:
+                rc = self.process.returncode if self.process else "N/A"
+                logger.error(f"trtllm-serve exited with code {rc}")
+                return False
+            check_count += 1
+            if check_count % 10 == 0:
+                logger.info(f"Waiting for trtllm-serve... ({check_count * 5}s elapsed)")
+            time.sleep(5)
+        return False
+
+    def switch_model(self, new_model_id: str) -> dict:
+        """Switch to a different model. Blocks until complete. Thread-safe."""
+        with self._switch_lock:
+            return self._do_switch(new_model_id)
+
+    def _do_switch(self, new_model_id: str) -> dict:
+        previous_model = self.model_id
+        previous_path = self.model_path
+        switch_start = time.time()
+
+        if new_model_id == self.model_id and self.status == "serving":
+            return {
+                "previous_model": previous_model,
+                "current_model": self.model_id,
+                "status": "serving",
+                "switch_time_seconds": 0
+            }
+
+        # Resolve new model path via MLflow
+        try:
+            new_model_path = query_mlflow_model_path(new_model_id)
+        except Exception as e:
+            return {
+                "previous_model": previous_model,
+                "current_model": previous_model,
+                "status": self.status,
+                "error": f"Failed to resolve {new_model_id}: {e}"
+            }
+
+        self.status = "switching"
+
+        # Stop current backend
+        self._kill_process()
+
+        # Start new backend
+        if self.start(new_model_path, new_model_id):
+            global tokenizer
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(new_model_path)
+                logger.info(f"Tokenizer reloaded for {new_model_id}")
+            except Exception as e:
+                logger.warning(f"Failed to reload tokenizer: {e}")
+
+            return {
+                "previous_model": previous_model,
+                "current_model": new_model_id,
+                "status": "serving",
+                "switch_time_seconds": round(time.time() - switch_start, 1)
+            }
+
+        # Rollback to previous model
+        logger.warning(f"Failed to start {new_model_id}, rolling back to {previous_model}")
+        if previous_path and self.start(previous_path, previous_model):
+            return {
+                "previous_model": previous_model,
+                "current_model": previous_model,
+                "status": "serving",
+                "error": f"Failed to load {new_model_id}: backend failed to start. Rolled back to {previous_model}"
+            }
+
+        return {
+            "previous_model": previous_model,
+            "current_model": previous_model,
+            "status": "error",
+            "error": f"Failed to load {new_model_id} and failed to rollback to {previous_model}"
+        }
+
+
+backend = TrtllmBackend()
+atexit.register(backend.stop)
+
+
+# ============================================================================
+# Initialization
+# ============================================================================
+
 def initialize():
-    """Initialize tokenizer and HTTP clients"""
+    """Initialize tokenizer and HTTP clients."""
     global tokenizer, http_client, sync_http_client
-    print(f"Model ID: {MODEL_ID}")
-    print(f"Model path: {MODEL_PATH}")
+    print(f"Model ID: {backend.model_id}")
+    print(f"Model path: {backend.model_path}")
     print(f"Backend URL: {TRTLLM_BACKEND_URL}")
 
-    # Load tokenizer for chat template formatting
     print("Loading tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+    tokenizer = AutoTokenizer.from_pretrained(backend.model_path)
 
-    # Initialize async HTTP client for FastAPI endpoints
     http_client = httpx.AsyncClient(
         base_url=TRTLLM_BACKEND_URL,
         timeout=httpx.Timeout(300.0, connect=10.0),
     )
 
-    # Initialize sync HTTP client for Gradio (reused across requests)
     sync_http_client = httpx.Client(
         base_url=TRTLLM_BACKEND_URL,
         timeout=httpx.Timeout(300.0, connect=10.0),
     )
 
     print(f"Tokenizer loaded, HTTP clients initialized")
+
+
+# ============================================================================
+# Gradio UI
+# ============================================================================
 
 def generate_response(message: str, history: list, temperature: float = 0.7, max_tokens: int = 512):
     """Generate response via trtllm-serve backend with harmony chat template"""
@@ -97,7 +328,6 @@ def generate_response(message: str, history: list, temperature: float = 0.7, max
                 content = item.get("content", "")
                 # Normalize content: Gradio 6.x uses [{"type": "text", "text": "..."}]
                 if isinstance(content, list):
-                    # Extract text from content blocks
                     text_parts = []
                     for block in content:
                         if isinstance(block, dict) and block.get("type") == "text":
@@ -105,11 +335,9 @@ def generate_response(message: str, history: list, temperature: float = 0.7, max
                         elif isinstance(block, str):
                             text_parts.append(block)
                     content = "".join(text_parts)
-                # Only include role and content (strip metadata, options, etc.)
                 if content:
                     messages.append({"role": role, "content": content})
             elif isinstance(item, (list, tuple)) and len(item) == 2:
-                # Old tuple format: (user_msg, assistant_msg)
                 user_msg, assistant_msg = item
                 if user_msg:
                     messages.append({"role": "user", "content": str(user_msg)})
@@ -118,16 +346,14 @@ def generate_response(message: str, history: list, temperature: float = 0.7, max
             else:
                 logger.warning(f"Unknown history item format: {type(item)}, {item!r}")
 
-    # Add current message
     messages.append({"role": "user", "content": str(message)})
 
     logger.info(f"Final messages to send: {messages}")
 
-    # Call trtllm-serve backend using pooled sync client
     response = sync_http_client.post(
         "/v1/chat/completions",
         json={
-            "model": MODEL_ID,
+            "model": backend.model_id,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
@@ -140,18 +366,17 @@ def generate_response(message: str, history: list, temperature: float = 0.7, max
     response.raise_for_status()
     result = response.json()
 
-    # Extract response from trtllm-serve (already parsed harmony format)
     msg = result["choices"][0]["message"]
     content = msg.get("content") or ""
     yield content
 
-# Create Thinkube-styled Gradio interface
+
 thinkube_theme = create_thinkube_theme()
 
 demo = gr.ChatInterface(
     generate_response,
     title=APP_TITLE,
-    description=f"Chat with {MODEL_ID} (powered by TensorRT-LLM with NVFP4)",
+    description="Chat with the loaded model (powered by TensorRT-LLM with NVFP4)",
     examples=[
         ["Hello! How are you?", 0.7, 512],
         ["Can you explain quantum computing in simple terms?", 0.7, 512],
@@ -164,26 +389,107 @@ demo = gr.ChatInterface(
     ],
 )
 
-# Health check endpoint
+
+# ============================================================================
+# Health Check
+# ============================================================================
+
 @app.get("/health")
 async def health_check():
+    if backend.status not in ("serving",):
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unhealthy",
+                "backend_status": backend.status,
+                "model": backend.model_id,
+                "error": backend.error,
+            }
+        )
     try:
-        # Check if trtllm-serve backend is healthy
         response = await http_client.get("/health")
-        # trtllm-serve returns empty body with 200 OK when healthy
-        backend_status = "healthy" if response.status_code == 200 else "unhealthy"
-        return {
-            "status": "healthy",
-            "model": MODEL_ID,
-            "model_path": MODEL_PATH,
-            "engine": "trtllm-serve (MXFP4)",
-            "backend": {"status": backend_status}
-        }
+        if response.status_code == 200:
+            return {
+                "status": "healthy",
+                "model": backend.model_id,
+                "model_path": backend.model_path,
+                "engine": "trtllm-serve (MXFP4)",
+                "backend": {"status": "healthy"}
+            }
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unhealthy",
+                "model": backend.model_id,
+                "engine": "trtllm-serve (MXFP4)",
+                "backend": {"status": "unhealthy"}
+            }
+        )
     except Exception as e:
-        return {
-            "status": "unhealthy",
-            "error": str(e)
-        }
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unhealthy", "error": str(e)}
+        )
+
+
+# ============================================================================
+# Admin Management Endpoints (cluster-internal only, not exposed via HTTPRoute)
+# ============================================================================
+
+_admin_switch_lock = asyncio.Lock()
+
+
+@app.get("/admin/current-model")
+async def admin_current_model():
+    return JSONResponse({
+        "model_id": backend.model_id,
+        "model_path": backend.model_path,
+        "status": backend.status,
+        "engine": "trtllm-serve",
+        "uptime_seconds": backend.uptime_seconds,
+    })
+
+
+@app.post("/admin/switch-model")
+async def admin_switch_model(request: Request):
+    if _admin_switch_lock.locked():
+        return JSONResponse(
+            status_code=409,
+            content={"error": "Model switch already in progress"}
+        )
+
+    body = await request.json()
+    new_model_id = body.get("model_id")
+    if not new_model_id:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "model_id is required"}
+        )
+
+    if backend.status == "starting":
+        return JSONResponse(
+            status_code=409,
+            content={"error": "Backend is still starting, cannot switch models yet"}
+        )
+
+    async with _admin_switch_lock:
+        result = await asyncio.to_thread(backend.switch_model, new_model_id)
+
+    if result.get("status") == "error":
+        return JSONResponse(status_code=500, content=result)
+    return JSONResponse(content=result)
+
+
+@app.get("/admin/status")
+async def admin_status():
+    return JSONResponse({
+        "status": backend.status,
+        "model_id": backend.model_id,
+        "pid": backend.process.pid if backend.process and backend.process.poll() is None else None,
+        "ready": backend.status == "serving",
+        "uptime_seconds": backend.uptime_seconds,
+        "error": backend.error,
+    })
 
 
 # ============================================================================
@@ -223,11 +529,9 @@ async def _handle_batch_completions(body: dict, batch_requests: list):
         "batch_info": {"count": N, "processing_time_ms": X}
     }
     """
-    import asyncio
 
     start_time = time.time()
 
-    # Shared defaults from outer request
     default_temperature = body.get('temperature', 0.7)
     default_max_tokens = body.get('max_tokens', 512)
     default_top_p = body.get('top_p', 0.9)
@@ -242,7 +546,6 @@ async def _handle_batch_completions(body: dict, batch_requests: list):
             content={"error": {"message": "Empty batch", "type": "invalid_request"}}
         )
 
-    # Process requests concurrently via backend
     async def process_single_request(idx: int, req: dict):
         messages = req.get('messages', [])
         temperature = req.get('temperature', default_temperature)
@@ -252,7 +555,7 @@ async def _handle_batch_completions(body: dict, batch_requests: list):
         response = await http_client.post(
             "/v1/chat/completions",
             json={
-                "model": MODEL_ID,
+                "model": backend.model_id,
                 "messages": messages,
                 "temperature": temperature,
                 "max_tokens": max_tokens,
@@ -263,7 +566,6 @@ async def _handle_batch_completions(body: dict, batch_requests: list):
         response.raise_for_status()
         result = response.json()
 
-        # trtllm-serve returns structured harmony response
         msg = result["choices"][0]["message"]
         content = msg.get("content") or ""
         reasoning = msg.get("reasoning")
@@ -283,22 +585,19 @@ async def _handle_batch_completions(body: dict, batch_requests: list):
 
         return choice
 
-    # Run all requests concurrently (backend handles batching)
     tasks = [process_single_request(i, req) for i, req in enumerate(batch_requests)]
     all_choices = await asyncio.gather(*tasks)
 
-    # Sort by index to maintain order
     all_choices = sorted(all_choices, key=lambda x: x["index"])
 
     processing_time_ms = int((time.time() - start_time) * 1000)
     logger.info(f"Batch completed: {total_requests} prompts, {processing_time_ms}ms ({processing_time_ms/total_requests:.0f}ms/prompt)")
 
-    # Return OpenAI-like response with batch info
     return JSONResponse({
         "id": f"batch-{int(time.time() * 1000)}",
         "object": "batch.completion",
         "created": int(time.time()),
-        "model": MODEL_ID,
+        "model": backend.model_id,
         "choices": all_choices,
         "usage": {
             "prompt_tokens": 0,
@@ -330,19 +629,17 @@ async def openai_chat_completions(request: Request):
     try:
         body = await request.json()
 
-        # Check for batch mode - array of requests in "batch" field
         batch_requests = body.get('batch')
         if batch_requests and isinstance(batch_requests, list):
             return await _handle_batch_completions(body, batch_requests)
 
-        # Single request mode (standard OpenAI format)
         messages = body.get('messages', [])
-        tools = body.get('tools', None)  # OpenAI-compatible tools parameter
+        tools = body.get('tools', None)
         temperature = body.get('temperature', 0.7)
         max_tokens = body.get('max_tokens', 512)
         stream = body.get('stream', False)
         top_p = body.get('top_p', 0.9)
-        include_reasoning = body.get('include_reasoning', False)  # Optional: include chain-of-thought
+        include_reasoning = body.get('include_reasoning', False)
 
         logger.info(f"=== API Request ===")
         logger.info(f"max_tokens: {max_tokens}, temperature: {temperature}, top_p: {top_p}")
@@ -350,10 +647,8 @@ async def openai_chat_completions(request: Request):
         if tools:
             logger.info(f"Tools: {[t.get('function', {}).get('name') for t in tools if t.get('type') == 'function']}")
 
-        # Build request payload for backend
-        # trtllm-serve handles chat template application
         backend_payload = {
-            "model": MODEL_ID,
+            "model": backend.model_id,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
@@ -363,17 +658,14 @@ async def openai_chat_completions(request: Request):
         if tools:
             backend_payload["tools"] = tools
 
-        # Call trtllm-serve backend
         response = await http_client.post("/v1/chat/completions", json=backend_payload)
         response.raise_for_status()
         result = response.json()
 
-        # trtllm-serve returns structured harmony response
         msg = result["choices"][0]["message"]
         response_text = msg.get("content") or ""
         reasoning_text = msg.get("reasoning") if include_reasoning else None
         tool_calls = msg.get("tool_calls") or None
-        # Convert empty list to None for consistency
         if tool_calls is not None and len(tool_calls) == 0:
             tool_calls = None
         finish_reason = result["choices"][0].get("finish_reason", "stop")
@@ -386,14 +678,11 @@ async def openai_chat_completions(request: Request):
         if tool_calls:
             logger.info(f"Tool call names: {[tc['function']['name'] for tc in tool_calls]}")
 
-        # Generate unique ID
         completion_id = f"chatcmpl-{int(time.time() * 1000)}"
         created = int(time.time())
 
         if stream:
-            # Streaming response (simplified - sends full response in one chunk)
             async def generate_stream():
-                # Build message content
                 message_content = {"role": "assistant"}
                 if tool_calls:
                     message_content["tool_calls"] = tool_calls
@@ -406,7 +695,7 @@ async def openai_chat_completions(request: Request):
                     "id": completion_id,
                     "object": "chat.completion.chunk",
                     "created": created,
-                    "model": MODEL_ID,
+                    "model": backend.model_id,
                     "choices": [{
                         "index": 0,
                         "delta": message_content,
@@ -415,12 +704,11 @@ async def openai_chat_completions(request: Request):
                 }
                 yield f"data: {json.dumps(chunk)}\n\n"
 
-                # Final chunk with finish_reason
                 final_chunk = {
                     "id": completion_id,
                     "object": "chat.completion.chunk",
                     "created": created,
-                    "model": MODEL_ID,
+                    "model": backend.model_id,
                     "choices": [{
                         "index": 0,
                         "delta": {},
@@ -436,12 +724,9 @@ async def openai_chat_completions(request: Request):
                 headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
             )
 
-        # Non-streaming response
-        # Build message based on whether tool calls were made
         message = {"role": "assistant"}
         if tool_calls:
             message["tool_calls"] = tool_calls
-            # Content can be null or contain text when there are tool calls
             message["content"] = response_text if response_text else None
             api_finish_reason = "tool_calls"
         else:
@@ -452,7 +737,7 @@ async def openai_chat_completions(request: Request):
             "id": completion_id,
             "object": "chat.completion",
             "created": created,
-            "model": MODEL_ID,
+            "model": backend.model_id,
             "choices": [{
                 "index": 0,
                 "message": message,
@@ -465,7 +750,6 @@ async def openai_chat_completions(request: Request):
             })
         }
 
-        # Optionally include reasoning (chain-of-thought) in response
         if reasoning_text:
             response_data["reasoning"] = reasoning_text
 
@@ -485,12 +769,12 @@ async def openai_models():
     return JSONResponse({
         "object": "list",
         "data": [{
-            "id": MODEL_ID,
+            "id": backend.model_id,
             "object": "model",
             "created": int(time.time()),
             "owned_by": "thinkube",
             "permission": [],
-            "root": MODEL_ID,
+            "root": backend.model_id,
             "parent": None
         }]
     })
@@ -528,7 +812,6 @@ async def batch_completions(request: Request):
         "processing_time_ms": X
     }
     """
-    import asyncio
 
     try:
         start_time = time.time()
@@ -544,7 +827,6 @@ async def batch_completions(request: Request):
         total_requests = len(requests_list)
         logger.info(f"=== Batch Request === total={total_requests}")
 
-        # Process requests concurrently via backend
         async def process_single_request(idx: int, req: dict):
             messages = req.get('messages', [])
             temperature = req.get('temperature', 0.7)
@@ -554,7 +836,7 @@ async def batch_completions(request: Request):
             response = await http_client.post(
                 "/v1/chat/completions",
                 json={
-                    "model": MODEL_ID,
+                    "model": backend.model_id,
                     "messages": messages,
                     "temperature": temperature,
                     "max_tokens": max_tokens,
@@ -565,7 +847,6 @@ async def batch_completions(request: Request):
             response.raise_for_status()
             result = response.json()
 
-            # trtllm-serve returns structured harmony response
             msg = result["choices"][0]["message"]
             content = msg.get("content") or ""
             reasoning = msg.get("reasoning")
@@ -578,11 +859,9 @@ async def batch_completions(request: Request):
                 "reasoning": reasoning
             }
 
-        # Run all requests concurrently
         tasks = [process_single_request(i, req) for i, req in enumerate(requests_list)]
         results = await asyncio.gather(*tasks)
 
-        # Sort by index and remove index field
         results = sorted(results, key=lambda x: x["index"])
         all_responses = [{k: v for k, v in r.items() if k != "index"} for r in results]
 
@@ -611,11 +890,20 @@ app = gr.mount_gradio_app(
     path="/",
     theme=thinkube_theme,
     css=THINKUBE_CSS,
-    favicon_path="/app/icons/tk_ai.png"  # Thinkube AI icon
+    favicon_path="/app/icons/tk_ai.png"
 )
 
 if __name__ == "__main__":
-    # Initialize tokenizer and HTTP client
+    # Query MLflow for model artifact path
+    logger.info(f"Resolving model path for {INITIAL_MODEL_ID}...")
+    model_path = query_mlflow_model_path(INITIAL_MODEL_ID)
+
+    # Start trtllm-serve subprocess and wait for it to be ready
+    if not backend.start(model_path, INITIAL_MODEL_ID):
+        logger.error("Failed to start trtllm-serve, exiting")
+        sys.exit(1)
+
+    # Initialize tokenizer and HTTP clients
     initialize()
 
     # Run the server
