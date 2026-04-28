@@ -5,6 +5,7 @@ spec:
   deployment:
     type: component
     name: tensorrt
+    replicas: 0
 
   containers:
     - name: inference
