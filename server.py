@@ -433,8 +433,6 @@ demo = gr.ChatInterface(
 
 @app.get("/health")
 async def health_check():
-    if backend.status == "stopped" and backend.model_id is None:
-        return {"status": "idle", "model": None, "engine": "trtllm-serve"}
     if backend.status not in ("serving",):
         return JSONResponse(
             status_code=503,
