@@ -135,14 +135,17 @@ class TrtllmBackend:
             return int(time.time() - self.start_time)
         return 0
 
-    def start(self, model_path: str, model_id: str, wait_timeout: int = 600) -> bool:
+    def start(self, model_path: str, model_id: str, wait_timeout: int = 600,
+              max_context_length: int | None = None) -> bool:
         """Start trtllm-serve with the given model. Blocks until ready or timeout."""
         self.model_path = model_path
         self.model_id = model_id
         self.status = "starting"
         self.error = None
 
-        logger.info(f"Starting trtllm-serve for {model_id} from {model_path}")
+        self._write_extra_options(max_context_length)
+        logger.info(f"Starting trtllm-serve for {model_id} from {model_path}"
+                     + (f" (max_seq_len={max_context_length})" if max_context_length else ""))
 
         self.process = subprocess.Popen(
             [
@@ -207,12 +210,14 @@ class TrtllmBackend:
             time.sleep(5)
         return False
 
-    def switch_model(self, new_model_id: str, metadata: dict | None = None) -> dict:
+    def switch_model(self, new_model_id: str, metadata: dict | None = None,
+                     max_context_length: int | None = None) -> dict:
         """Switch to a different model. Blocks until complete. Thread-safe."""
         with self._switch_lock:
-            return self._do_switch(new_model_id, metadata)
+            return self._do_switch(new_model_id, metadata, max_context_length)
 
-    def _do_switch(self, new_model_id: str, metadata: dict | None = None) -> dict:
+    def _do_switch(self, new_model_id: str, metadata: dict | None = None,
+                   max_context_length: int | None = None) -> dict:
         previous_model = self.model_id
         previous_path = self.model_path
         previous_stop_tokens = self.stop_tokens
@@ -247,7 +252,7 @@ class TrtllmBackend:
         self._kill_process()
 
         # Start new backend
-        if self.start(new_model_path, new_model_id):
+        if self.start(new_model_path, new_model_id, max_context_length=max_context_length):
             if metadata:
                 self._apply_metadata(metadata)
 
@@ -284,6 +289,14 @@ class TrtllmBackend:
             "status": "error",
             "error": f"Failed to load {new_model_id} and failed to rollback to {previous_model}"
         }
+
+    def _write_extra_options(self, max_context_length: int | None = None):
+        """Write extra_llm_api_options.yaml with optional max_seq_len."""
+        lines = ["guided_decoding_backend: xgrammar"]
+        if max_context_length:
+            lines.append(f"max_seq_len: {max_context_length}")
+        with open("/tmp/extra_llm_api_options.yaml", "w") as f:
+            f.write("\n".join(lines) + "\n")
 
     def _apply_metadata(self, metadata: dict):
         if "stop_tokens" in metadata:
@@ -509,8 +522,12 @@ async def admin_switch_model(request: Request):
     if "tool_use" in body:
         metadata["tool_use"] = body["tool_use"]
 
+    max_context_length = body.get("max_context_length")
+
     async with _admin_switch_lock:
-        result = await asyncio.to_thread(backend.switch_model, new_model_id, metadata or None)
+        result = await asyncio.to_thread(
+            backend.switch_model, new_model_id, metadata or None, max_context_length
+        )
 
     if result.get("status") == "error":
         return JSONResponse(status_code=500, content=result)
