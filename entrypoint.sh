@@ -1,10 +1,8 @@
 #!/bin/bash
 set -e
 
-MODEL_ID="${MODEL_ID:?MODEL_ID environment variable is required}"
-
-echo "=== TensorRT-LLM Inference Server Startup ==="
-echo "Model: ${MODEL_ID}"
+echo "=== TensorRT-LLM Inference Server Startup (idle mode) ==="
+echo "Model loading via /admin/switch-model"
 
 # Fix LD_LIBRARY_PATH to include NVIDIA cuda_nvrtc libraries
 # Required for TensorRT-LLM bindings to find libnvrtc.so.12

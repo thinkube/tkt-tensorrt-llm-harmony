@@ -7,7 +7,6 @@ and exposes /admin/* endpoints for model switching by thinkube-control.
 """
 
 import os
-import sys
 import json
 import time
 import logging
@@ -31,10 +30,6 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-INITIAL_MODEL_ID = os.environ.get("MODEL_ID", "nvidia/Phi-4-multimodal-instruct-FP4")
-
-_initial_stop_tokens_raw = os.environ.get("STOP_TOKENS", "")
-INITIAL_STOP_TOKENS = json.loads(_initial_stop_tokens_raw) if _initial_stop_tokens_raw.strip() else []
 APP_NAME = os.environ.get("APP_NAME", "tensorrt-llm")
 APP_TITLE = os.environ.get("APP_TITLE", APP_NAME)
 
@@ -125,7 +120,7 @@ class TrtllmBackend:
         self.start_time: float | None = None
         self.error: str | None = None
         self._switch_lock = threading.Lock()
-        self.stop_tokens: list[str] = INITIAL_STOP_TOKENS
+        self.stop_tokens: list[str] = []
         self.reasoning_format: str | None = None
         self.tool_use: bool = False
 
@@ -319,14 +314,8 @@ atexit.register(backend.stop)
 # ============================================================================
 
 def initialize():
-    """Initialize tokenizer and HTTP clients."""
+    """Initialize HTTP clients (and tokenizer if a model is loaded)."""
     global tokenizer, http_client, sync_http_client
-    print(f"Model ID: {backend.model_id}")
-    print(f"Model path: {backend.model_path}")
-    print(f"Backend URL: {TRTLLM_BACKEND_URL}")
-
-    print("Loading tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(backend.model_path)
 
     http_client = httpx.AsyncClient(
         base_url=TRTLLM_BACKEND_URL,
@@ -338,7 +327,12 @@ def initialize():
         timeout=httpx.Timeout(300.0, connect=10.0),
     )
 
-    print(f"Tokenizer loaded, HTTP clients initialized")
+    if backend.model_path:
+        print(f"Loading tokenizer for {backend.model_id}...")
+        tokenizer = AutoTokenizer.from_pretrained(backend.model_path)
+        print(f"Tokenizer loaded, HTTP clients initialized")
+    else:
+        print("Starting in idle mode — no model loaded")
 
 
 # ============================================================================
@@ -348,6 +342,10 @@ def initialize():
 def generate_response(message: str, history: list, temperature: float = 0.7, max_tokens: int = 512):
     """Generate response via trtllm-serve backend with harmony chat template"""
     global sync_http_client
+
+    if backend.status != "serving":
+        yield "No model loaded. Use the thinkube control panel to load a model."
+        return
 
     logger.info(f"=== Gradio generate_response ===")
     logger.info(f"message type: {type(message)}, value: {message!r}")
@@ -435,6 +433,8 @@ demo = gr.ChatInterface(
 
 @app.get("/health")
 async def health_check():
+    if backend.status == "stopped" and backend.model_id is None:
+        return {"status": "idle", "model": None, "engine": "trtllm-serve"}
     if backend.status not in ("serving",):
         return JSONResponse(
             status_code=503,
@@ -680,6 +680,8 @@ async def openai_chat_completions(request: Request):
 
     Proxies to trtllm-serve backend and applies harmony format parsing.
     """
+    if backend.status != "serving":
+        return JSONResponse(status_code=503, content={"error": {"message": "No model loaded", "type": "server_error"}})
     try:
         body = await request.json()
 
@@ -820,6 +822,8 @@ async def openai_chat_completions(request: Request):
 @app.get("/v1/models")
 async def openai_models():
     """OpenAI-compatible models endpoint - returns available LLM model"""
+    if backend.model_id is None:
+        return JSONResponse({"object": "list", "data": []})
     return JSONResponse({
         "object": "list",
         "data": [{
@@ -948,19 +952,9 @@ app = gr.mount_gradio_app(
 )
 
 if __name__ == "__main__":
-    # Query MLflow for model artifact path
-    logger.info(f"Resolving model path for {INITIAL_MODEL_ID}...")
-    model_path = query_mlflow_model_path(INITIAL_MODEL_ID)
-
-    # Start trtllm-serve subprocess and wait for it to be ready
-    if not backend.start(model_path, INITIAL_MODEL_ID):
-        logger.error("Failed to start trtllm-serve, exiting")
-        sys.exit(1)
-
-    # Initialize tokenizer and HTTP clients
+    logger.info("Starting in idle mode — waiting for model load via /admin/switch-model")
     initialize()
 
-    # Run the server
     uvicorn.run(
         app,
         host="0.0.0.0",
