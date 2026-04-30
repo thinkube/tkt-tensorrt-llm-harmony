@@ -286,13 +286,10 @@ class TrtllmBackend:
         }
 
     def _write_extra_options(self, max_context_length: int | None = None):
-        """Write extra_llm_api_options.yaml with optional max_seq_len."""
+        """Write extra_llm_api_options.yaml with max_seq_len."""
         lines = ["guided_decoding_backend: xgrammar"]
-        if max_context_length:
-            lines.append(f"max_seq_len: {max_context_length}")
-        kv_fraction = os.environ.get("TRTLLM_KV_CACHE_FREE_GPU_MEM_FRACTION", "0.5")
-        lines.append(f"kv_cache_config:")
-        lines.append(f"  free_gpu_memory_fraction: {kv_fraction}")
+        ctx = max_context_length or int(os.environ.get("TRTLLM_DEFAULT_MAX_SEQ_LEN", "8192"))
+        lines.append(f"max_seq_len: {ctx}")
         with open("/tmp/extra_llm_api_options.yaml", "w") as f:
             f.write("\n".join(lines) + "\n")
 
