@@ -15,6 +15,7 @@ import subprocess
 import threading
 import atexit
 
+import yaml
 import httpx
 import requests
 import urllib3
@@ -130,6 +131,15 @@ class TrtllmBackend:
             return int(time.time() - self.start_time)
         return 0
 
+    def _detect_model_type(self, model_path: str) -> str | None:
+        """Read model_type from the model's config.json."""
+        config_path = os.path.join(model_path, "config.json")
+        try:
+            with open(config_path) as f:
+                return json.load(f).get("model_type")
+        except Exception:
+            return None
+
     def start(self, model_path: str, model_id: str, wait_timeout: int = 600,
               max_context_length: int | None = None) -> bool:
         """Start trtllm-serve with the given model. Blocks until ready or timeout."""
@@ -138,20 +148,27 @@ class TrtllmBackend:
         self.status = "starting"
         self.error = None
 
-        self._write_extra_options(max_context_length)
+        model_type = self._detect_model_type(model_path)
+        self._write_extra_options(max_context_length, model_type)
         logger.info(f"Starting trtllm-serve for {model_id} from {model_path}"
+                     + (f" (model_type={model_type})" if model_type else "")
                      + (f" (max_seq_len={max_context_length})" if max_context_length else ""))
 
-        self.process = subprocess.Popen(
-            [
-                "trtllm-serve", model_path,
-                "--backend", "pytorch",
-                "--extra_llm_api_options", "/tmp/extra_llm_api_options.yaml",
-                "--host", "127.0.0.1",
-                "--port", "8355",
-                "--log_level", "info",
-            ]
-        )
+        cmd = [
+            "trtllm-serve", model_path,
+            "--backend", "pytorch",
+            "--extra_llm_api_options", "/tmp/extra_llm_api_options.yaml",
+            "--host", "127.0.0.1",
+            "--port", "8355",
+            "--max_batch_size", "8",
+            "--max_num_tokens", "8192",
+            "--trust_remote_code",
+            "--log_level", "info",
+        ]
+        if self.reasoning_format and self.reasoning_format.startswith("nano"):
+            cmd.extend(["--reasoning_parser", "nano-v3"])
+
+        self.process = subprocess.Popen(cmd)
 
         logger.info(f"trtllm-serve started with PID {self.process.pid}")
 
@@ -243,13 +260,15 @@ class TrtllmBackend:
 
         self.status = "switching"
 
+        # Apply metadata before start so reasoning_format is available for CLI flags
+        if metadata:
+            self._apply_metadata(metadata)
+
         # Stop current backend
         self._kill_process()
 
         # Start new backend
         if self.start(new_model_path, new_model_id, max_context_length=max_context_length):
-            if metadata:
-                self._apply_metadata(metadata)
 
             global tokenizer
             try:
@@ -285,13 +304,33 @@ class TrtllmBackend:
             "error": f"Failed to load {new_model_id} and failed to rollback to {previous_model}"
         }
 
-    def _write_extra_options(self, max_context_length: int | None = None):
-        """Write extra_llm_api_options.yaml with max_seq_len."""
-        lines = ["guided_decoding_backend: xgrammar"]
+    def _write_extra_options(self, max_context_length: int | None = None,
+                             model_type: str | None = None):
+        """Write extra_llm_api_options.yaml based on model architecture."""
         ctx = max_context_length or int(os.environ.get("TRTLLM_DEFAULT_MAX_SEQ_LEN", "8192"))
-        lines.append(f"max_seq_len: {ctx}")
+        config: dict = {
+            "guided_decoding_backend": "xgrammar",
+            "max_seq_len": ctx,
+            "enable_chunked_prefill": True,
+        }
+
+        if model_type == "nemotron_h":
+            config["kv_cache_config"] = {
+                "dtype": "fp8",
+                "enable_block_reuse": False,
+                "free_gpu_memory_fraction": 0.9,
+                "mamba_ssm_cache_dtype": "float16",
+                "mamba_ssm_stochastic_rounding": True,
+                "mamba_ssm_philox_rounds": 5,
+            }
+        else:
+            config["kv_cache_config"] = {
+                "free_gpu_memory_fraction": 0.9,
+            }
+
         with open("/tmp/extra_llm_api_options.yaml", "w") as f:
-            f.write("\n".join(lines) + "\n")
+            yaml.dump(config, f, default_flow_style=False)
+        logger.info(f"extra_llm_api_options.yaml: model_type={model_type}, max_seq_len={ctx}")
 
     def _apply_metadata(self, metadata: dict):
         if "stop_tokens" in metadata:

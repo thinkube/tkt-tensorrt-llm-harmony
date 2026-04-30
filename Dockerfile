@@ -1,6 +1,10 @@
 ARG CONTAINER_REGISTRY
 FROM ${CONTAINER_REGISTRY}/library/tensorrt-llm-base:1.3.0rc13
 
+# Download Nemotron reasoning parser (required for --reasoning_parser nano-v3)
+RUN curl -sL -o /app/super_v3_reasoning_parser.py \
+    "https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/raw/main/super_v3_reasoning_parser.py"
+
 # Copy application code
 COPY server.py .
 COPY thinkube_theme.py .
