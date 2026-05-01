@@ -771,7 +771,6 @@ async def openai_chat_completions(request: Request):
         max_tokens = body.get('max_tokens', 512)
         stream = body.get('stream', False)
         top_p = body.get('top_p', 0.9)
-        include_reasoning = body.get('include_reasoning', False)
 
         logger.info(f"=== API Request ===")
         logger.info(f"max_tokens: {max_tokens}, temperature: {temperature}, top_p: {top_p}")
@@ -796,7 +795,7 @@ async def openai_chat_completions(request: Request):
 
         msg = result["choices"][0]["message"]
         response_text = msg.get("content") or ""
-        reasoning_text = msg.get("reasoning") if include_reasoning else None
+        reasoning_text = msg.get("reasoning_content") or None
         tool_calls = msg.get("tool_calls") or None
         if tool_calls is not None and len(tool_calls) == 0:
             tool_calls = None
@@ -856,13 +855,13 @@ async def openai_chat_completions(request: Request):
                 headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
             )
 
-        message = {"role": "assistant"}
+        message = {"role": "assistant", "content": response_text}
+        if reasoning_text:
+            message["reasoning_content"] = reasoning_text
         if tool_calls:
             message["tool_calls"] = tool_calls
-            message["content"] = response_text if response_text else None
             api_finish_reason = "tool_calls"
         else:
-            message["content"] = response_text
             api_finish_reason = "stop"
 
         response_data = {
@@ -881,9 +880,6 @@ async def openai_chat_completions(request: Request):
                 "total_tokens": 0
             })
         }
-
-        if reasoning_text:
-            response_data["reasoning"] = reasoning_text
 
         return JSONResponse(response_data)
 
