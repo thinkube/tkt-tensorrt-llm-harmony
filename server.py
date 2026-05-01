@@ -374,6 +374,43 @@ def initialize():
         print("Starting in idle mode — no model loaded")
 
 
+def _do_auto_load(model_id: str):
+    """Auto-load a model from MODEL_ID env var on startup."""
+    global tokenizer
+
+    logger.info(f"Auto-loading model from MODEL_ID env var: {model_id}")
+
+    metadata = {}
+    stop_tokens_str = os.environ.get("STOP_TOKENS")
+    if stop_tokens_str:
+        metadata["stop_tokens"] = json.loads(stop_tokens_str)
+    if os.environ.get("REASONING_FORMAT"):
+        metadata["reasoning_format"] = os.environ["REASONING_FORMAT"]
+    if os.environ.get("TOOL_USE", "").lower() == "true":
+        metadata["tool_use"] = True
+
+    max_context_length = (int(os.environ["MAX_CONTEXT_LENGTH"])
+                          if os.environ.get("MAX_CONTEXT_LENGTH") else None)
+
+    result = backend.switch_model(model_id, metadata or None, max_context_length)
+
+    if result.get("status") == "serving":
+        logger.info(f"Auto-load complete: {model_id}")
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(backend.model_path)
+        except Exception as e:
+            logger.warning(f"Failed to load tokenizer: {e}")
+    else:
+        logger.error(f"Auto-load failed: {result}")
+
+
+@app.on_event("startup")
+async def startup_auto_load():
+    env_model_id = os.environ.get("MODEL_ID")
+    if env_model_id:
+        asyncio.create_task(asyncio.to_thread(_do_auto_load, env_model_id))
+
+
 # ============================================================================
 # Gradio UI
 # ============================================================================
