@@ -6,6 +6,9 @@ spec:
     type: component
     name: tensorrt
     replicas: 0
+    # Pods are created per node by the LLM gateway when a model is loaded, so
+    # resting at zero replicas is idle rather than disabled.
+    gateway_managed: true
 
   containers:
     - name: inference
