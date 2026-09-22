@@ -4,7 +4,7 @@
 apiVersion: thinkube.io/v1
 kind: TemplateManifest
 metadata:
-  name: tkt-tensorrt-llm
+  name: tkt-tensorrt-llm-harmony
   title: TensorRT-LLM Inference Server
   description: NVIDIA TensorRT-LLM optimized inference — model managed by LLM Gateway
   version: 1.0.0
