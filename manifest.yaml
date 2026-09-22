@@ -1,3 +1,6 @@
+# Copyright Alejandro Martínez Corriá and the Thinkube contributors
+# SPDX-License-Identifier: MIT
+
 apiVersion: thinkube.io/v1
 kind: TemplateManifest
 metadata:

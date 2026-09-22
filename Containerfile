@@ -1,3 +1,6 @@
+# Copyright Alejandro Martínez Corriá and the Thinkube contributors
+# SPDX-License-Identifier: MIT
+
 ARG CONTAINER_REGISTRY
 FROM ${CONTAINER_REGISTRY}/library/tensorrt-llm-base:1.3.0rc13
 
