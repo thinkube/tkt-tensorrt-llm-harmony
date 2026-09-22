@@ -1,7 +1,5 @@
 # TensorRT-LLM Inference Server Template
 
-# ⚠️ Under Development - Not Ready for Use
-
 NVIDIA TensorRT-LLM optimized inference template with Gradio UI and NVFP4 support for Blackwell GPUs (DGX Spark GB10).
 
 ## Features
