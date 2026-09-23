@@ -42,3 +42,6 @@ htmlcov/
 # Temporary files
 *.tmp
 temp/
+
+# Local Claude Code and Tandem state
+.claude/ .tandem/
