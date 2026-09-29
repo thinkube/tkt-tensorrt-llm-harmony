@@ -67,31 +67,7 @@ These are the models the model catalogue
 marks for TensorRT-LLM. A model that is not in the catalogue cannot be
 mirrored or served.
 
-### GPT-OSS (MXFP4)
-- openai/gpt-oss-20b
-- openai/gpt-oss-120b
-
-### Llama and Nemotron Models (FP4/FP8/NVFP4)
-- nvidia/Llama-3_3-Nemotron-Super-49B-v1_5-FP8
-- nvidia/Llama-3_3-Nemotron-Super-49B-v1_5-NVFP4
-- nvidia/Llama-4-Scout-17B-16E-Instruct-FP4
-- nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
-- nvidia/NVIDIA-Nemotron-Nano-9B-v2-NVFP4
-
-### Qwen Models (FP4/FP8)
-- nvidia/Qwen3-8B-FP8, nvidia/Qwen3-8B-FP4
-- nvidia/Qwen3-14B-FP8, nvidia/Qwen3-14B-FP4
-- nvidia/Qwen3-32B-FP4
-- nvidia/Qwen3-30B-A3B-FP4
-- nvidia/Qwen2.5-VL-7B-Instruct-FP8, nvidia/Qwen2.5-VL-7B-Instruct-FP4
-- nvidia/Qwen3-235B-A22B-FP4 (requires two DGX Sparks)
-
-### Gemma Models (NVFP4)
-- nvidia/Gemma-4-31B-IT-NVFP4
-
-### Phi Models (FP4/FP8)
-- nvidia/Phi-4-multimodal-instruct-FP8, nvidia/Phi-4-multimodal-instruct-FP4
-- nvidia/Phi-4-reasoning-plus-FP8, nvidia/Phi-4-reasoning-plus-FP4
+- openai/gpt-oss-20b (MXFP4, harmony format)
 
 ## Working on it
 
