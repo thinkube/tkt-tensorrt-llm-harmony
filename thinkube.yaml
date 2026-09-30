@@ -3,6 +3,9 @@
 
 apiVersion: thinkube.io/v1
 kind: ThinkubeDeployment
+metadata:
+  # The application's version; the generated app starts at it.
+  version: "0.1.0"
 
 spec:
   deployment:
