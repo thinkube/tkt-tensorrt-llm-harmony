@@ -1,0 +1,35 @@
+# Copyright Alejandro Martínez Corriá and the Thinkube contributors
+# SPDX-License-Identifier: MIT
+
+ARG CONTAINER_REGISTRY
+FROM ${CONTAINER_REGISTRY}/library/tensorrt-llm-base:1.3.0rc13
+
+# Download Nemotron reasoning parser (required for --reasoning_parser nano-v3)
+RUN curl -sL -o /app/super_v3_reasoning_parser.py \
+    "https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/raw/main/super_v3_reasoning_parser.py"
+
+# Copy application code
+COPY server.py .
+COPY thinkube_theme.py .
+COPY entrypoint.sh .
+
+# Copy Thinkube icons
+COPY tk_ai.svg tk_ai.png /app/icons/
+
+# Make entrypoint executable
+RUN chmod +x entrypoint.sh
+
+# The base image already has:
+# - Working directory set to /app
+# - Icons directory created
+# - All dependencies: TensorRT-LLM, openai, gradio, mlflow, openai-harmony
+# - Pre-downloaded tiktoken encodings for offline support
+
+# Model ID and HF token passed as environment variables at deployment time
+# Not baked into the image to enable image reuse across deployments
+
+# Expose ports: 7860 for Gradio, 8355 for TensorRT-LLM API
+EXPOSE 7860 8355
+
+# Run the entrypoint script
+CMD ["./entrypoint.sh"]

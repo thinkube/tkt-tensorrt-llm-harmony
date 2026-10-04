@@ -1,0 +1,33 @@
+# Copyright Alejandro Martínez Corriá and the Thinkube contributors
+# SPDX-License-Identifier: MIT
+
+apiVersion: thinkube.io/v1
+kind: ThinkubeDeployment
+metadata:
+  # The application's version; the generated app starts at it.
+  version: "0.1.0"
+
+spec:
+  deployment:
+    type: component
+    name: tensorrt
+    replicas: 0
+    # Pods are created per node by the LLM gateway when a model is loaded, so
+    # resting at zero replicas is idle rather than disabled.
+    gateway_managed: true
+
+  containers:
+    - name: inference
+      build: .
+      port: 7860
+      size: xlarge
+      gpu:
+        count: 1
+        memory: "80Gi"
+      health: /health
+      test:
+        enabled: false
+
+  routes:
+    - path: /
+      to: inference
