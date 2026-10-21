@@ -5,7 +5,7 @@ apiVersion: thinkube.io/v1
 kind: ThinkubeDeployment
 metadata:
   # The application's version; the generated app starts at it.
-  version: "0.1.0"
+  version: "0.1.1"
 
 spec:
   deployment:
@@ -15,6 +15,15 @@ spec:
     # Pods are created per node by the LLM gateway when a model is loaded, so
     # resting at zero replicas is idle rather than disabled.
     gateway_managed: true
+
+  # The LLM gateway serves models on this component: one pod per model,
+  # copied from the inference container's Deployment.
+  llm_backend:
+    type: tensorrt-llm
+    display_name: TensorRT-LLM
+    container: inference
+    driver: per-model-pod
+    tier: performance
 
   containers:
     - name: inference
