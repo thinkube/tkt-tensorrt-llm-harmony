@@ -22,7 +22,8 @@ RUN chmod +x entrypoint.sh
 # The base image already has:
 # - Working directory set to /app
 # - Icons directory created
-# - All dependencies: TensorRT-LLM, openai, gradio, mlflow, openai-harmony
+# - All dependencies: TensorRT-LLM, openai, gradio, openai-harmony (MLflow is
+#   called over its REST API with requests)
 # - Pre-downloaded tiktoken encodings for offline support
 
 # Model ID and HF token passed as environment variables at deployment time

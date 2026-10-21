@@ -1,9 +1,6 @@
 # TensorRT-LLM - NVIDIA optimized inference engine with NVFP4 support
 # Already installed in tensorrt-llm base image
 
-# MLflow - For querying MLflow Model Registry and fetching model metadata
-mlflow~=3.6.0
-
 # Requests - For HTTP requests (Keycloak authentication)
 requests>=2.28.0
 
