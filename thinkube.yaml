@@ -16,6 +16,15 @@ spec:
     # resting at zero replicas is idle rather than disabled.
     gateway_managed: true
 
+  # The LLM gateway serves models on this component: one pod per model,
+  # copied from the inference container's Deployment.
+  llm_backend:
+    type: tensorrt-llm
+    display_name: TensorRT-LLM
+    container: inference
+    driver: per-model-pod
+    tier: performance
+
   containers:
     - name: inference
       build: .
